@@ -37,7 +37,7 @@ Any VDA5050-conformant fleet manager can drive this simulator directly. A few re
 
 - FastAPI service (Python 3.11, `uv`), one `SimulatedAgv` state machine + async pub/sub task set per configured robot (`src/vda5050_sim/agv.py`, `fleet.py`).
 - A `Transport` abstraction (`src/vda5050_sim/transport.py`) is the only thing that differs between the two modes: `NatsTransport` (dot-separated subjects, core NATS pub/sub, no retained/replay — so `connection`/`state`/`visualization` are heartbeated continuously) and `MqttTransport` (slash-separated topics over real MQTT via `aiomqtt`). The `SimulatedAgv`/`Fleet` logic is identical either way.
-- Wire schemas, error constants, topic conventions, and robot-spec/factsheet data are reused from the public [`nova-vda5050`](https://github.com/wandelbotsgmbh/nova-vda5050) package rather than hand-rolled.
+- Wire schemas (`src/vda5050_sim/schemas.py`) are implemented directly against the official [VDA5050 3.0.0 JSON Schemas](https://github.com/VDA5050/VDA5050) — including field names that differ from common v1/v2-era naming (e.g. `nodeDescriptor` not `nodeDescription`, `maximumSpeed` not `maxSpeed`), and the fact that v3.0.0 edges have no `startNodeId`/`endNodeId` at all (traversal order comes purely from a shared node/edge `sequenceId` space).
 
 ## API Surface
 
@@ -85,9 +85,7 @@ uv run ruff check
 ## Troubleshooting
 
 - **A fleet manager can't see the robots over MQTT**: confirm `TRANSPORT=mqtt` and that both sides point at the same broker/`MQTT_TOPIC_PREFIX`; `mosquitto_sub -t 'vda5050/v3/#' -v` is the fastest way to check traffic is flowing at all.
-- **`uv sync` fails to resolve `nova-vda5050`**: it's a git dependency (`github.com/wandelbotsgmbh/nova-vda5050`, public, no auth needed) — check network access to GitHub, not credentials.
 
 ## Related
 
-- [VDA5050 specification](https://github.com/VDA5050/VDA5050)
-- [`nova-vda5050`](https://github.com/wandelbotsgmbh/nova-vda5050) (schemas/errors/robot-specs this service depends on)
+- [VDA5050 specification](https://github.com/VDA5050/VDA5050) — this simulator's schemas (`src/vda5050_sim/schemas.py`) and vendored JSON Schemas (`src/vda5050_sim/json_schemas/`) are implemented directly against it.

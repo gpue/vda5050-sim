@@ -10,9 +10,9 @@ from helpers import (
     make_order,
     publish_order,
 )
-from nova_vda5050.schemas import ConnectionState
 
 from vda5050_sim.agv import RobotConfig
+from vda5050_sim.schemas import ConnectionState
 
 MODEL, SERIAL = "spot", "test-spot-01"
 
@@ -21,7 +21,7 @@ async def test_connection_lifecycle_on_startup(fm, fleet_factory):
     serial = "lifecycle-spot-01"
     async with connection_listener(fm, TEST_PREFIX, MODEL, serial) as listener:
         await fleet_factory([RobotConfig(id=serial, model=MODEL, supported_actions=[])])
-        broken = await listener.wait_for(lambda c: c.connectionState == ConnectionState.CONNECTIONBROKEN)
+        broken = await listener.wait_for(lambda c: c.connectionState == ConnectionState.CONNECTION_BROKEN)
         online = await listener.wait_for(lambda c: c.connectionState == ConnectionState.ONLINE)
     assert broken.headerId < online.headerId
 

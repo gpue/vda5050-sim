@@ -1,10 +1,10 @@
 """Transport abstraction: the same Fleet/SimulatedAgv logic can speak either
 
-- NATS (`vda5050.v3.{manufacturer}.{serial}.*`) — wire-compatible with
-  nova-nav's dashboard, for running as a Nova app; or
 - plain MQTT (`vda5050/v3/{manufacturer}/{serial}/*`) — the real VDA5050
   wire protocol, so any standard fleet manager/master control can connect
-  directly with no Nova platform or NATS bus involved.
+  directly with no other infrastructure required; or
+- NATS (`vda5050.v3.{manufacturer}.{serial}.*`) — for teams whose own stack
+  already runs on a NATS message bus instead of MQTT.
 """
 
 from __future__ import annotations
@@ -16,8 +16,9 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from nats.aio.client import Client as NATS
-from nova_vda5050 import InstantActionsMessage, OrderMessage
 from pydantic import BaseModel
+
+from vda5050_sim.schemas import InstantActionsMessage, OrderMessage
 
 logger = logging.getLogger("vda5050_sim.transport")
 

@@ -7,12 +7,12 @@ import asyncio
 from pathlib import Path
 
 import yaml
-from nova_vda5050 import ROBOT_SPECS
-from nova_vda5050.schemas import ConnectionState
 
 from vda5050_sim.agv import FaultProfile, RobotConfig, SimulatedAgv
 from vda5050_sim.config import Settings
 from vda5050_sim.logbuffer import LogBuffer
+from vda5050_sim.robot_specs import ROBOT_SPECS
+from vda5050_sim.schemas import ConnectionState
 from vda5050_sim.transport import Transport
 
 
@@ -30,7 +30,7 @@ def load_fleet_config(path: str) -> list[RobotConfig]:
     for entry in data.get("robots", []):
         fault = entry.get("fault_profile") or {}
         model = entry["model"]
-        # Fall back to the real robot's published top speed (nova_vda5050's
+        # Fall back to the real robot's published top speed (this repo's own
         # ROBOT_SPECS registry) instead of inventing one, unless overridden.
         max_speed = entry.get("max_speed")
         if max_speed is None:
@@ -39,6 +39,7 @@ def load_fleet_config(path: str) -> list[RobotConfig]:
             RobotConfig(
                 id=entry["id"],
                 model=model,
+                manufacturer=entry.get("manufacturer", ""),
                 supported_actions=list(entry.get("supported_actions", [])),
                 max_speed=max_speed,
                 initial_battery=float(entry.get("initial_battery", 100.0)),
@@ -60,7 +61,10 @@ class RobotRuntime:
         self.settings = settings
         self._tasks: list[asyncio.Task] = []
         self._subs: list = []
-        self._last_state_header_id: int | None = None
+        # referenceStateHeaderId is required (not optional) in v3.0.0's
+        # visualization schema — start at 0 in case visualization's first
+        # tick races ahead of state's first publish.
+        self._last_state_header_id: int = 0
         self.online = False
 
     async def start(self) -> None:
@@ -102,7 +106,7 @@ class RobotRuntime:
             await asyncio.sleep(tick_s)
 
     async def _connection_loop(self) -> None:
-        await self._publish("connection", self.agv.build_connection_message(ConnectionState.CONNECTIONBROKEN))
+        await self._publish("connection", self.agv.build_connection_message(ConnectionState.CONNECTION_BROKEN))
         await asyncio.sleep(0.2)
         self.online = True
         await self._publish("connection", self.agv.build_connection_message(ConnectionState.ONLINE))
@@ -110,7 +114,7 @@ class RobotRuntime:
             await asyncio.sleep(self.settings.connection_heartbeat_s)
             if self.agv.should_drop_connection():
                 self.online = False
-                await self._publish("connection", self.agv.build_connection_message(ConnectionState.CONNECTIONBROKEN))
+                await self._publish("connection", self.agv.build_connection_message(ConnectionState.CONNECTION_BROKEN))
                 await asyncio.sleep(self.settings.connection_heartbeat_s)
                 self.online = True
             await self._publish("connection", self.agv.build_connection_message(ConnectionState.ONLINE))

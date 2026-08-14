@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import asyncio
 
-from nova_vda5050 import (
+from vda5050_sim.robot_specs import get_manufacturer
+from vda5050_sim.schemas import (
+    Action,
+    BlockingType,
     ConnectionMessage,
+    Edge,
     FactsheetMessage,
     InstantActionsMessage,
+    Node,
+    NodePosition,
     OrderMessage,
     StateMessage,
     VisualizationMessage,
-    get_manufacturer,
 )
-from nova_vda5050.schemas import Action, BlockingType
-from nova_vda5050.schemas.order import Edge, Node, NodePosition
 
 TEST_PREFIX = "vda5050.v3test"
 
@@ -27,17 +30,31 @@ def make_node(node_id: str, seq: int, x: float, y: float, *, released: bool = Tr
     )
 
 
-def make_edge(
-    edge_id: str, seq: int, start: str, end: str, *, released: bool = True, actions=None
-) -> Edge:
-    return Edge(
-        edgeId=edge_id,
-        sequenceId=seq,
-        released=released,
-        startNodeId=start,
-        endNodeId=end,
-        actions=actions or [],
-    )
+def make_edge(edge_id: str, seq: int, *, released: bool = True, actions=None) -> Edge:
+    # v3.0.0 edges have no startNodeId/endNodeId — traversal order comes
+    # purely from the shared node/edge sequenceId space (see agv.py).
+    return Edge(edgeId=edge_id, sequenceId=seq, released=released, actions=actions or [])
+
+
+def make_route(
+    positions: list[tuple[float, float]],
+    *,
+    node_ids: list[str] | None = None,
+    edge_ids: list[str] | None = None,
+    edge_released: list[bool] | None = None,
+    node_actions: dict[int, list[Action]] | None = None,
+) -> tuple[list[Node], list[Edge]]:
+    """Build a straight-line node/edge chain with correctly interleaved
+    sequenceIds (node=even, edge=odd) from a list of (x, y) positions."""
+    n = len(positions)
+    node_ids = node_ids or [f"n{i}" for i in range(n)]
+    edge_ids = edge_ids or [f"e{i}" for i in range(n - 1)]
+    edge_released = edge_released if edge_released is not None else [True] * (n - 1)
+    node_actions = node_actions or {}
+
+    nodes = [make_node(node_ids[i], i * 2, x, y, actions=node_actions.get(i)) for i, (x, y) in enumerate(positions)]
+    edges = [make_edge(edge_ids[i], i * 2 + 1, released=edge_released[i]) for i in range(n - 1)]
+    return nodes, edges
 
 
 def make_action(action_id: str, action_type: str, *, blocking: BlockingType = BlockingType.NONE) -> Action:

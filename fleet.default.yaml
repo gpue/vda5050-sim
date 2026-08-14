@@ -1,30 +1,37 @@
-# Default fleet: 5 real robot archetypes from nova_vda5050's ROBOT_SPECS
-# registry (manufacturer, physical params, and factsheet all come from that
-# public registry instead of invented fictional robots) — deliberately
-# multi-vendor, since that's the whole reason VDA5050 exists.
+# Default fleet: 5 real robot archetypes from this repo's own ROBOT_SPECS
+# registry (src/vda5050_sim/robot_specs.py) — manufacturer and physical
+# parameters come from each manufacturer's public datasheet, not invented
+# fictional robots — deliberately multi-vendor, since that's the whole
+# reason VDA5050 exists.
 #
 # Override with FLEET_CONFIG_PATH=/path/to/custom.yaml to run a different
-# roster; robot count and features are entirely config-driven.
+# roster; robot count and features are entirely config-driven. `manufacturer`
+# is optional — it defaults to the ROBOT_SPECS entry for `model` if omitted.
 
 robots:
   - id: spot-01
-    model: spot # Boston Dynamics Spot — quadruped carrier, 14kg payload
+    model: spot
+    manufacturer: BostonDynamics # quadruped carrier, 14kg payload
     supported_actions: [pick, drop]
 
   - id: go2-01
-    model: go2 # Unitree Go2 — fast patrol quadruped, no cargo actions
+    model: go2
+    manufacturer: Unitree # fast patrol quadruped, no cargo actions
     supported_actions: []
 
   - id: tiago-01
-    model: tiago # PAL Robotics TIAGo — mobile manipulator
+    model: tiago
+    manufacturer: PALRobotics # mobile manipulator
     supported_actions: [pick, place, lift]
 
   - id: h1-01
-    model: h1 # Unitree H1 — humanoid, gesture-style instant actions
+    model: h1
+    manufacturer: Unitree # humanoid, gesture-style instant actions
     supported_actions: [wave]
 
   - id: pidog-01
-    model: pidog # SunFounder PiDog — cheap/slow hobby robot, deliberately flaky
+    model: pidog
+    manufacturer: SunFounder # cheap/slow hobby robot, deliberately flaky
     supported_actions: [bark]
     fault_profile:
       connection_drop_probability: 0.03

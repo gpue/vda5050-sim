@@ -5,12 +5,6 @@
 FROM python:3.11-slim AS runtime
 WORKDIR /app
 
-# git/ca-certificates: uv fetches nova-vda5050 from GitHub (public repo, no
-# credentials needed).
-RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates \
- && rm -rf /var/lib/apt/lists/*
-
 COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /usr/local/bin/uv
 
 ENV UV_LINK_MODE=copy \

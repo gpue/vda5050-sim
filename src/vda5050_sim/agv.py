@@ -4,6 +4,10 @@ Implements the actual VDA5050 order-validation rules (idle-gate on new
 orderId, orderUpdateId accept/reject/ignore, cancelOrder, pause, blockingType)
 rather than the shallow approximation found in most reference simulators —
 this is the part a fleet manager actually needs exercised correctly.
+
+Movement follows the real v3.0.0 traversal model: nodes and edges share a
+single `sequenceId` space (nodes at even positions, edges at odd positions
+between them) — there is no `startNodeId`/`endNodeId` on Edge in v3.0.0.
 """
 
 from __future__ import annotations
@@ -14,37 +18,32 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from nova_vda5050 import (
-    ConnectionMessage,
-    InstantActionsMessage,
-    OrderMessage,
-    StateMessage,
-    VisualizationMessage,
-    action_def,
-    build_factsheet,
-    get_manufacturer,
-    make_error,
-)
-from nova_vda5050.schemas import (
+from vda5050_sim import errors as sim_errors
+from vda5050_sim.robot_specs import action_def, build_factsheet, get_manufacturer
+from vda5050_sim.schemas import (
+    Action,
     ActionState,
     ActionStatus,
     BlockingType,
+    ConnectionMessage,
     ConnectionState,
+    Edge,
     EdgeState,
+    EmergencyStopType,
     Error,
-    ErrorLevel,
-    EStopState,
+    FactsheetMessage,
+    InstantActionsMessage,
     MobileRobotPosition,
+    Node,
     NodeState,
     OperatingMode,
+    OrderMessage,
     PowerSupply,
     SafetyState,
+    StateMessage,
     Velocity,
+    VisualizationMessage,
 )
-from nova_vda5050.schemas.factsheet import FactsheetMessage
-from nova_vda5050.schemas.order import Edge, Node
-
-from vda5050_sim import errors as sim_errors
 
 LogFn = Callable[[str, str], None]
 
@@ -65,14 +64,15 @@ class FaultProfile:
 class RobotConfig:
     id: str
     model: str
+    manufacturer: str = ""
     supported_actions: list[str] = field(default_factory=list)
     max_speed: float | None = None
     initial_battery: float = 100.0
     fault_profile: FaultProfile = field(default_factory=FaultProfile)
 
-    @property
-    def manufacturer(self) -> str:
-        return get_manufacturer(self.model)
+    def __post_init__(self) -> None:
+        if not self.manufacturer:
+            self.manufacturer = get_manufacturer(self.model)
 
 
 _BLOCKING_TYPES_THAT_HOLD_MOVEMENT = (BlockingType.HARD, BlockingType.SOFT, BlockingType.SINGLE)
@@ -122,7 +122,7 @@ class SimulatedAgv:
         self.map_id = "default"
         self.battery_soc = cfg.initial_battery
         self.charging = False
-        self.estop = EStopState.NONE
+        self.emergency_stop = EmergencyStopType.NONE
 
         self.pending_errors: list[Error] = []
         self.factsheet_requested = True  # publish once at startup
@@ -157,7 +157,7 @@ class SimulatedAgv:
     def _order_content_equal(self, order: OrderMessage) -> bool:
         if self._order_snapshot is None:
             return False
-        fields = {"orderId", "orderUpdateId", "nodes", "edges", "zoneSetId"}
+        fields = {"orderId", "orderUpdateId", "nodes", "edges"}
         return self._order_snapshot.model_dump(include=fields) == order.model_dump(include=fields)
 
     # -- order handling ---------------------------------------------------------
@@ -173,18 +173,16 @@ class SimulatedAgv:
                     return
                 self._log(f"order update rejected (sameOrderUpdateId): {order.orderId}#{order.orderUpdateId}")
                 self.pending_errors.append(
-                    make_error(
+                    sim_errors.make_error(
                         sim_errors.SAME_ORDER_UPDATE_ID,
-                        ErrorLevel.WARNING,
                         f"orderUpdateId {order.orderUpdateId} already processed with different content",
                     )
                 )
             else:
                 self._log(f"order update rejected (outdatedOrderUpdate): {order.orderId}#{order.orderUpdateId}")
                 self.pending_errors.append(
-                    make_error(
+                    sim_errors.make_error(
                         sim_errors.OUTDATED_ORDER_UPDATE,
-                        ErrorLevel.WARNING,
                         f"orderUpdateId {order.orderUpdateId} is lower than current {self.order_update_id}",
                     )
                 )
@@ -196,11 +194,7 @@ class SimulatedAgv:
         else:
             self._log(f"order rejected (otherOrderActive): {order.orderId} while running {self.order_id}")
             self.pending_errors.append(
-                make_error(
-                    sim_errors.OTHER_ORDER_ACTIVE,
-                    ErrorLevel.WARNING,
-                    f"robot is executing order {self.order_id}",
-                )
+                sim_errors.make_error(sim_errors.OTHER_ORDER_ACTIVE, f"robot is executing order {self.order_id}")
             )
 
     def _accept_order(self, order: OrderMessage, *, is_update: bool) -> None:
@@ -219,22 +213,14 @@ class SimulatedAgv:
             for action in node.actions:
                 if action.actionId not in known_ids:
                     self.action_states.append(
-                        ActionState(
-                            actionId=action.actionId,
-                            actionType=action.actionType,
-                            actionStatus=ActionStatus.WAITING,
-                        )
+                        ActionState(actionId=action.actionId, actionType=action.actionType, actionStatus=ActionStatus.WAITING)
                     )
                     known_ids.add(action.actionId)
         for edge in self.edges:
             for action in edge.actions:
                 if action.actionId not in known_ids:
                     self.action_states.append(
-                        ActionState(
-                            actionId=action.actionId,
-                            actionType=action.actionType,
-                            actionStatus=ActionStatus.WAITING,
-                        )
+                        ActionState(actionId=action.actionId, actionType=action.actionType, actionStatus=ActionStatus.WAITING)
                     )
                     known_ids.add(action.actionId)
         self.new_base_request = False
@@ -245,7 +231,7 @@ class SimulatedAgv:
         for action in msg.actions:
             self._handle_instant_action(action)
 
-    def _handle_instant_action(self, action) -> None:  # action: nova_vda5050 Action
+    def _handle_instant_action(self, action: Action) -> None:
         at = action.actionType
         if at == "cancelOrder":
             if self.order_id and not self.is_idle():
@@ -261,11 +247,11 @@ class SimulatedAgv:
                         actionId=action.actionId,
                         actionType=at,
                         actionStatus=ActionStatus.FAILED,
-                        resultDescription="no active order to cancel",
+                        actionResult="no active order to cancel",
                     )
                 )
                 self.pending_errors.append(
-                    make_error(sim_errors.NO_ORDER_TO_CANCEL, ErrorLevel.WARNING, "cancelOrder received with no active order")
+                    sim_errors.make_error(sim_errors.NO_ORDER_TO_CANCEL, "cancelOrder received with no active order")
                 )
         elif at == "startPause":
             self.paused = True
@@ -296,12 +282,10 @@ class SimulatedAgv:
                     actionId=action.actionId,
                     actionType=at,
                     actionStatus=ActionStatus.FAILED,
-                    resultDescription="unsupported action type",
+                    actionResult="unsupported action type",
                 )
             )
-            self.pending_errors.append(
-                make_error(sim_errors.VALIDATION_ERROR, ErrorLevel.WARNING, f"unsupported instantAction '{at}'")
-            )
+            self.pending_errors.append(sim_errors.make_error(sim_errors.VALIDATION_ERROR, f"unsupported instantAction '{at}'"))
 
     def _finish_cancel(self) -> None:
         aid = self._cancel_requested_action_id
@@ -321,22 +305,23 @@ class SimulatedAgv:
         self._cancel_requested_action_id = None
 
     # -- movement engine ------------------------------------------------------
+    #
+    # v3.0.0 has no startNodeId/endNodeId on Edge: nodes and edges share one
+    # sequenceId space (node, edge, node, edge, ...), so the edge that follows
+    # a node has sequenceId == node.sequenceId + 1, and the node that follows
+    # that edge has sequenceId == edge.sequenceId + 1.
 
-    def _find_node_by_id(self, node_id: str) -> Node | None:
-        for n in self.nodes:
-            if n.nodeId == node_id:
-                return n
-        return None
+    def _find_node_by_seq(self, seq: int) -> Node | None:
+        return next((n for n in self.nodes if n.sequenceId == seq), None)
 
-    def _current_node_id(self) -> str:
-        if self.last_node_id:
-            return self.last_node_id
-        return self.nodes[0].nodeId if self.nodes else ""
+    def _find_edge_by_seq(self, seq: int) -> Edge | None:
+        return next((e for e in self.edges if e.sequenceId == seq), None)
 
-    def _find_outgoing_edge(self) -> Edge | None:
-        cur = self._current_node_id()
-        candidates = [e for e in self.edges if e.startNodeId == cur]
-        return min(candidates, key=lambda e: e.sequenceId) if candidates else None
+    def _current_node(self) -> Node | None:
+        node = self._find_node_by_seq(self.last_node_sequence_id)
+        if node is not None:
+            return node
+        return min(self.nodes, key=lambda n: n.sequenceId) if self.nodes else None
 
     def _run_node_actions(self, node: Node) -> bool:
         """Advance node-bound actions one tick. Returns True if movement must hold."""
@@ -376,12 +361,12 @@ class SimulatedAgv:
         self.y += dy / dist * step
         return False
 
-    def _arrive_at(self, node: Node, edge: Edge, *, departed_node_id: str) -> None:
+    def _arrive_at(self, node: Node, edge: Edge, *, departed_seq: int) -> None:
         self.last_node_id = node.nodeId
         self.last_node_sequence_id = node.sequenceId
-        self._log(f"arrived at node '{node.nodeId}'")
-        self.edges = [e for e in self.edges if e.edgeId != edge.edgeId]
-        self.nodes = [n for n in self.nodes if n.nodeId != departed_node_id]
+        self._log(f"arrived at node '{node.nodeId}' (seq {node.sequenceId})")
+        self.edges = [e for e in self.edges if e.sequenceId != edge.sequenceId]
+        self.nodes = [n for n in self.nodes if n.sequenceId != departed_seq]
         self.driving = False
 
     def tick(self, dt: float) -> None:
@@ -398,19 +383,22 @@ class SimulatedAgv:
             self.driving = False
             return
 
-        cur_id = self._current_node_id()
-        current_node = self._find_node_by_id(cur_id)
+        current_node = self._current_node()
         if current_node is not None and self._run_node_actions(current_node):
             self.driving = False
             return
 
-        edge = self._find_outgoing_edge()
-        if edge is None:
+        if current_node is None:
             self.driving = False
-            if current_node is not None:
-                self.last_node_id = current_node.nodeId
-                self.last_node_sequence_id = current_node.sequenceId
-                self.nodes = [n for n in self.nodes if n.nodeId != current_node.nodeId]
+            return
+
+        edge = self._find_edge_by_seq(current_node.sequenceId + 1)
+        if edge is None:
+            # No further edge from here — order graph exhausted from this node.
+            self.driving = False
+            self.last_node_id = current_node.nodeId
+            self.last_node_sequence_id = current_node.sequenceId
+            self.nodes = [n for n in self.nodes if n.sequenceId != current_node.sequenceId]
             return
 
         if not edge.released:
@@ -418,7 +406,7 @@ class SimulatedAgv:
             self.new_base_request = True
             return
 
-        next_node = self._find_node_by_id(edge.endNodeId)
+        next_node = self._find_node_by_seq(edge.sequenceId + 1)
         if next_node is None or not next_node.released:
             self.driving = False
             self.new_base_request = True
@@ -426,14 +414,14 @@ class SimulatedAgv:
 
         self.driving = True
         if self._step_towards(next_node, dt):
-            self._arrive_at(next_node, edge, departed_node_id=cur_id)
+            self._arrive_at(next_node, edge, departed_seq=current_node.sequenceId)
 
     # -- fault injection --------------------------------------------------------
 
     def maybe_inject_fault(self) -> None:
         prob = self.cfg.fault_profile.error_injection_probability
         if prob and random.random() < prob:
-            self.pending_errors.append(make_error("hardwareFault", ErrorLevel.WARNING, "simulated transient fault"))
+            self.pending_errors.append(sim_errors.make_error(sim_errors.HARDWARE_FAULT, "simulated transient fault"))
             self._log("simulated fault injected")
 
     def should_drop_connection(self) -> bool:
@@ -446,11 +434,11 @@ class SimulatedAgv:
         errors = list(self.pending_errors)
         self.pending_errors.clear()
         node_states = [
-            NodeState(nodeId=n.nodeId, sequenceId=n.sequenceId, released=n.released, nodeDescription=n.nodeDescription)
+            NodeState(nodeId=n.nodeId, sequenceId=n.sequenceId, released=n.released, nodeDescriptor=n.nodeDescriptor)
             for n in self.nodes
         ]
         edge_states = [
-            EdgeState(edgeId=e.edgeId, sequenceId=e.sequenceId, released=e.released, edgeDescription=e.edgeDescription)
+            EdgeState(edgeId=e.edgeId, sequenceId=e.sequenceId, released=e.released, edgeDescriptor=e.edgeDescriptor)
             for e in self.edges
         ]
         return StateMessage(
@@ -469,11 +457,7 @@ class SimulatedAgv:
             velocity=Velocity(),
             powerSupply=PowerSupply(stateOfCharge=self.battery_soc, charging=self.charging),
             operatingMode=OperatingMode.AUTOMATIC,
-            # activeEmergencyStop (V3 alias for eStop) is required by nova_vda5050's
-            # bundled state JSON Schema even though the Pydantic field is Optional —
-            # populate both so schema validation (see tests/test_schema_validation.py)
-            # passes.
-            safetyState=SafetyState(eStop=self.estop, fieldViolation=False, activeEmergencyStop=self.estop),
+            safetyState=SafetyState(activeEmergencyStop=self.emergency_stop, fieldViolation=False),
             nodeStates=node_states,
             edgeStates=edge_states,
             actionStates=list(self.action_states),
@@ -481,7 +465,7 @@ class SimulatedAgv:
             errors=errors,
         )
 
-    def build_visualization_message(self, reference_state_header_id: int | None) -> VisualizationMessage:
+    def build_visualization_message(self, reference_state_header_id: int) -> VisualizationMessage:
         return VisualizationMessage(
             headerId=self._next_header_id("visualization"),
             timestamp=_now(),
@@ -490,12 +474,6 @@ class SimulatedAgv:
             referenceStateHeaderId=reference_state_header_id,
             mobileRobotPosition=MobileRobotPosition(x=self.x, y=self.y, theta=self.theta, mapId=self.map_id, localized=True),
             velocity=Velocity(),
-            orderId=self.order_id,
-            orderUpdateId=self.order_update_id,
-            lastNodeId=self.last_node_id,
-            lastNodeSequenceId=self.last_node_sequence_id,
-            driving=self.driving,
-            paused=self.paused,
         )
 
     def build_connection_message(self, state: ConnectionState) -> ConnectionMessage:
@@ -514,4 +492,10 @@ class SimulatedAgv:
             action_def("disable", "Disable robot", blocking=["HARD"]),
         ]
         custom = [action_def(a, a) for a in self.cfg.supported_actions]
-        return build_factsheet(self.cfg.model, self.serial_number, supported_actions=base + custom, simulated=True)
+        return build_factsheet(
+            self.cfg.model,
+            self.serial_number,
+            self._next_header_id("factsheet"),
+            _now(),
+            supported_actions=base + custom,
+        )
