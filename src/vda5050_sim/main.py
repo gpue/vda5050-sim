@@ -18,7 +18,9 @@ logger = logging.getLogger("vda5050_sim")
 settings = get_settings()
 log_buffer = LogBuffer(maxlen=settings.log_buffer_size)
 
-_UI_INDEX = Path(__file__).resolve().parent.parent.parent / "ui" / "index.html"
+_UI_DIR = Path(__file__).resolve().parent.parent.parent / "ui"
+_UI_INDEX = _UI_DIR / "index.html"
+_APP_ICON = _UI_DIR / "app_icon.svg"
 
 
 @asynccontextmanager
@@ -73,3 +75,8 @@ async def logs(n: int = 200) -> JSONResponse:
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(_UI_INDEX)
+
+
+@app.get("/app_icon.svg")
+async def app_icon() -> FileResponse:
+    return FileResponse(_APP_ICON, media_type="image/svg+xml")
