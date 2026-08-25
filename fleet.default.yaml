@@ -7,6 +7,24 @@
 # Override with FLEET_CONFIG_PATH=/path/to/custom.yaml to run a different
 # roster; robot count and features are entirely config-driven. `manufacturer`
 # is optional — it defaults to the ROBOT_SPECS entry for `model` if omitted.
+#
+# Full per-robot schema (all fields besides id/model are optional):
+#   id: str
+#   model: str                              # key into ROBOT_SPECS
+#   manufacturer: str                       # defaults from ROBOT_SPECS[model]
+#   supported_actions: [str, ...]           # generic instant actions this robot accepts
+#   max_speed: float                        # m/s; defaults from ROBOT_SPECS[model].maximumSpeed
+#   angular_speed: float                    # rad/s; defaults from ROBOT_SPECS[model].maximumAngularSpeed
+#   initial_battery: float                  # percent, default 100.0
+#   battery_drain_percent_per_meter: float  # default from DEFAULT_BATTERY_DRAIN_PERCENT_PER_METER
+#   battery_charge_percent_per_s: float     # default from DEFAULT_BATTERY_CHARGE_PERCENT_PER_S
+#   fault_profile:
+#     connection_drop_probability: float    # per connection-heartbeat tick
+#     error_injection_probability: float    # per real tick — generic hardwareFault, or marks a RUNNING retriable action RETRIABLE
+#                                            # (fleet control must send retry/skipRetry — see spec Table 4)
+#     field_violation_probability: float    # per real tick — halts movement for a few seconds, then auto-clears
+#     service_mode_probability: float       # per real tick — suspends order execution (operatingMode=SERVICE), then auto-recovers
+#     emergency_stop_probability: float     # per real tick — sets safetyState.activeEmergencyStop (MANUAL/REMOTE), then auto-clears
 
 robots:
   - id: spot-01

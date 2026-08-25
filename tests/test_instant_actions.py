@@ -12,6 +12,7 @@ from helpers import (
     make_node,
     make_order,
     make_route,
+    poll_until,
     publish_instant_actions,
     publish_order,
     state_listener,
@@ -26,22 +27,30 @@ async def test_cancel_order_clears_state_and_allows_new_order(running_fleet, fm)
     nodes, edges = make_route([(0.0, 0.0), (50.0, 0.0)])
     order = make_order(order_id="cancel-1", order_update_id=0, model=MODEL, serial=SERIAL, nodes=nodes, edges=edges)
     await publish_order(fm, TEST_PREFIX, MODEL, SERIAL, order)
-    await asyncio.sleep(0.2)  # confirm it's actually running, not idle
 
-    async with state_listener(fm, TEST_PREFIX, MODEL, SERIAL) as listener:
-        cancel = make_instant_actions(model=MODEL, serial=SERIAL, actions=[make_action("c1", "cancelOrder")])
-        await publish_instant_actions(fm, TEST_PREFIX, MODEL, SERIAL, cancel)
+    # Deterministically wait for the order to actually be active (rather than
+    # a fixed sleep guess) — under system load, NATS delivery + the first
+    # movement tick can take longer than a fixed sleep budget, which would
+    # otherwise make cancelOrder see a still-idle robot and go down the
+    # "no active order" path instead of the one this test exercises.
+    agv = running_fleet.runtimes[SERIAL].agv
+    await poll_until(lambda: agv.order_id == "cancel-1" and agv.driving)
 
-        matched = await listener.wait_for(
-            lambda s: any(a.actionId == "c1" and a.actionStatus == ActionStatus.RUNNING for a in s.instantActionStates)
-        )
-        assert matched is not None
+    # cancelOrder resolves RUNNING->FINISHED on the very next movement tick
+    # (up to tick_s later) — that can be a shorter window than any periodic
+    # `state` publish interval, so poll the AGV's own instant_action_states
+    # directly (ground truth) rather than round-tripping through NATS.
+    cancel = make_instant_actions(model=MODEL, serial=SERIAL, actions=[make_action("c1", "cancelOrder")])
+    await publish_instant_actions(fm, TEST_PREFIX, MODEL, SERIAL, cancel)
 
-        finished = await listener.wait_for(
-            lambda s: any(a.actionId == "c1" and a.actionStatus == ActionStatus.FINISHED for a in s.instantActionStates)
-        )
-        assert finished.orderId == ""
-        assert finished.driving is False
+    await poll_until(
+        lambda: any(a.actionId == "c1" and a.actionStatus == ActionStatus.RUNNING for a in agv.instant_action_states)
+    )
+    await poll_until(
+        lambda: any(a.actionId == "c1" and a.actionStatus == ActionStatus.FINISHED for a in agv.instant_action_states)
+    )
+    assert agv.order_id == ""
+    assert agv.driving is False
 
     # A brand-new order must now be accepted immediately (idle gate satisfied).
     follow_up = make_order(

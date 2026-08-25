@@ -4,6 +4,7 @@ active Transport (NATS for Nova-app mode, MQTT for standalone mode)."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 
 import yaml
@@ -13,7 +14,7 @@ from vda5050_sim.config import Settings
 from vda5050_sim.logbuffer import LogBuffer
 from vda5050_sim.robot_specs import ROBOT_SPECS
 from vda5050_sim.schemas import ConnectionState
-from vda5050_sim.transport import Transport
+from vda5050_sim.transport import RETAINED_MESSAGE_TYPES, Transport, TransportFactory
 
 
 def _resolve_path(path: str) -> Path:
@@ -30,11 +31,14 @@ def load_fleet_config(path: str) -> list[RobotConfig]:
     for entry in data.get("robots", []):
         fault = entry.get("fault_profile") or {}
         model = entry["model"]
-        # Fall back to the real robot's published top speed (this repo's own
-        # ROBOT_SPECS registry) instead of inventing one, unless overridden.
+        # Fall back to the real robot's published top speed/turn rate (this
+        # repo's own ROBOT_SPECS registry) instead of inventing one, unless overridden.
         max_speed = entry.get("max_speed")
         if max_speed is None:
             max_speed = ROBOT_SPECS.get(model, {}).get("maximumSpeed")
+        angular_speed = entry.get("angular_speed")
+        if angular_speed is None:
+            angular_speed = ROBOT_SPECS.get(model, {}).get("maximumAngularSpeed")
         robots.append(
             RobotConfig(
                 id=entry["id"],
@@ -42,10 +46,16 @@ def load_fleet_config(path: str) -> list[RobotConfig]:
                 manufacturer=entry.get("manufacturer", ""),
                 supported_actions=list(entry.get("supported_actions", [])),
                 max_speed=max_speed,
+                angular_speed=angular_speed,
                 initial_battery=float(entry.get("initial_battery", 100.0)),
+                battery_drain_percent_per_meter=entry.get("battery_drain_percent_per_meter"),
+                battery_charge_percent_per_s=entry.get("battery_charge_percent_per_s"),
                 fault_profile=FaultProfile(
                     connection_drop_probability=float(fault.get("connection_drop_probability", 0.0)),
                     error_injection_probability=float(fault.get("error_injection_probability", 0.0)),
+                    field_violation_probability=float(fault.get("field_violation_probability", 0.0)),
+                    service_mode_probability=float(fault.get("service_mode_probability", 0.0)),
+                    emergency_stop_probability=float(fault.get("emergency_stop_probability", 0.0)),
                 ),
             )
         )
@@ -76,6 +86,12 @@ class RobotRuntime:
                 self.agv.manufacturer, self.agv.serial_number, self._on_instant_actions
             )
         )
+        self._subs.append(
+            await self.transport.subscribe_zone_set(self.agv.manufacturer, self.agv.serial_number, self._on_zone_set)
+        )
+        self._subs.append(
+            await self.transport.subscribe_responses(self.agv.manufacturer, self.agv.serial_number, self._on_responses)
+        )
         self._tasks = [
             asyncio.create_task(self._movement_loop()),
             asyncio.create_task(self._connection_loop()),
@@ -84,10 +100,19 @@ class RobotRuntime:
         ]
 
     async def stop(self) -> None:
+        # Best-effort: report an orderly disconnect before tearing down, so a
+        # clean shutdown doesn't look identical to a crash to a fleet manager.
+        # OFFLINE is the schema's best-fit value for "disconnecting in an
+        # orderly fashion" (see schemas.py's ConnectionState enum note).
+        with contextlib.suppress(Exception):
+            await self._publish("connection", self.agv.build_connection_message(ConnectionState.OFFLINE))
         for t in self._tasks:
             t.cancel()
         for s in self._subs:
-            await s.unsubscribe()
+            # A prior self-triggered _do_shutdown() (from the `shutdown`
+            # instant action) may have already unsubscribed these.
+            with contextlib.suppress(Exception):
+                await s.unsubscribe()
 
     async def _on_order(self, order) -> None:
         self.agv.handle_order(order)
@@ -95,23 +120,55 @@ class RobotRuntime:
     async def _on_instant_actions(self, msg) -> None:
         self.agv.handle_instant_actions(msg)
 
+    async def _on_zone_set(self, msg) -> None:
+        self.agv.handle_zone_set(msg)
+
+    async def _on_responses(self, msg) -> None:
+        self.agv.handle_responses(msg)
+
     async def _publish(self, message_type: str, model) -> None:
-        await self.transport.publish(self.agv.manufacturer, self.agv.serial_number, message_type, model)
+        retain = message_type in RETAINED_MESSAGE_TYPES
+        await self.transport.publish(self.agv.manufacturer, self.agv.serial_number, message_type, model, retain=retain)
 
     async def _movement_loop(self) -> None:
         tick_s = self.settings.tick_s
         while True:
             self.agv.tick(tick_s)
-            self.agv.maybe_inject_fault()
+            self.agv.maybe_inject_fault(tick_s)
+            if self.agv.shutdown_requested:
+                await self._do_shutdown()
+                return
             await asyncio.sleep(tick_s)
+
+    async def _do_shutdown(self) -> None:
+        # Mirrors stop()'s orderly-disconnect publish, but self-triggered from
+        # inside a loop this same call cancels — must not cancel itself.
+        with contextlib.suppress(Exception):
+            await self._publish("connection", self.agv.build_connection_message(ConnectionState.OFFLINE))
+        current = asyncio.current_task()
+        for t in self._tasks:
+            if t is not current:
+                t.cancel()
+        for s in self._subs:
+            await s.unsubscribe()
 
     async def _connection_loop(self) -> None:
         await self._publish("connection", self.agv.build_connection_message(ConnectionState.CONNECTION_BROKEN))
         await asyncio.sleep(0.2)
         self.online = True
+        was_hibernating = False
         await self._publish("connection", self.agv.build_connection_message(ConnectionState.ONLINE))
         while True:
             await asyncio.sleep(self.settings.connection_heartbeat_s)
+            if self.agv.hibernating:
+                if not was_hibernating:
+                    await self._publish("connection", self.agv.build_connection_message(ConnectionState.HIBERNATING))
+                    was_hibernating = True
+                continue
+            if was_hibernating:
+                await self._publish("connection", self.agv.build_connection_message(ConnectionState.ONLINE))
+                was_hibernating = False
+                continue
             if self.agv.should_drop_connection():
                 self.online = False
                 await self._publish("connection", self.agv.build_connection_message(ConnectionState.CONNECTION_BROKEN))
@@ -121,14 +178,24 @@ class RobotRuntime:
 
     async def _state_loop(self) -> None:
         interval = 1.0 / self.settings.state_hz
+        self.agv.state_request_event = asyncio.Event()
         while True:
+            if self.agv.hibernating:
+                # Spec: "no longer needs to send state messages" while
+                # HIBERNATING — stop publishing until stopHibernation.
+                await asyncio.sleep(min(interval, 0.5))
+                continue
             if self.agv.factsheet_requested:
                 self.agv.factsheet_requested = False
                 await self._publish("factsheet", self.agv.build_factsheet_message())
             state = self.agv.build_state_message()
             self._last_state_header_id = state.headerId
             await self._publish("state", state)
-            await asyncio.sleep(interval)
+            self.agv.state_request_event.clear()
+            # stateRequest wakes this early instead of waiting out the full
+            # interval; a normal timeout just falls through to the next publish.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.agv.state_request_event.wait(), timeout=interval)
 
     async def _visualization_loop(self) -> None:
         interval = 1.0 / self.settings.visualization_hz
@@ -138,27 +205,43 @@ class RobotRuntime:
 
 
 class Fleet:
-    def __init__(self, settings: Settings, transport: Transport, log_buffer: LogBuffer) -> None:
+    """Owns one RobotRuntime per configured robot. Each runtime's Transport
+    comes from `transport_factory` — for NATS mode that's the same shared,
+    already-connected instance every time; for MQTT mode it's a fresh
+    per-robot connection (own Last-Will-Testament) each call. Either way,
+    Fleet tracks each *unique* transport instance so it closes each one
+    exactly once on shutdown, regardless of how many robots share it."""
+
+    def __init__(self, settings: Settings, transport_factory: TransportFactory, log_buffer: LogBuffer) -> None:
         self.settings = settings
-        self.transport = transport
+        self.transport_factory = transport_factory
         self.log_buffer = log_buffer
         self.runtimes: dict[str, RobotRuntime] = {}
+        self._transports: dict[int, Transport] = {}
 
     async def start(self, configs: list[RobotConfig]) -> None:
         for cfg in configs:
+            transport = await self.transport_factory(cfg)
+            self._transports[id(transport)] = transport
             agv = SimulatedAgv(
                 cfg,
                 action_duration_s=self.settings.action_duration_s,
                 default_speed_mps=self.settings.default_speed_mps,
+                default_angular_speed_rad_s=self.settings.default_angular_speed_rad_s,
+                horizon_threshold_nodes=self.settings.horizon_threshold_nodes,
+                default_battery_drain_percent_per_meter=self.settings.default_battery_drain_percent_per_meter,
+                default_battery_charge_percent_per_s=self.settings.default_battery_charge_percent_per_s,
                 on_log=self.log_buffer.add,
             )
-            runtime = RobotRuntime(agv, self.transport, self.settings)
+            runtime = RobotRuntime(agv, transport, self.settings)
             self.runtimes[cfg.id] = runtime
             await runtime.start()
 
     async def stop(self) -> None:
         for runtime in self.runtimes.values():
             await runtime.stop()
+        for transport in self._transports.values():
+            await transport.close()
 
     def snapshot(self) -> list[dict]:
         out = []

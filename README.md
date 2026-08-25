@@ -1,8 +1,13 @@
 # vda5050-sim
 
-A standards-compliant [VDA5050](https://github.com/VDA5050/VDA5050) (v3.0.0) robot fleet simulator. It fakes a configurable fleet of AGVs — by default 5 real robot archetypes (Boston Dynamics Spot, Unitree Go2, PAL Robotics TIAGo, Unitree H1, SunFounder PiDog) — that speak the real order/instant-action/state protocol, so you can point any VDA5050 fleet manager at it and watch it drive a graph, reject conflicting orders, cancel, pause, etc., without needing real hardware.
+A standards-compliant [VDA5050](https://github.com/VDA5050/VDA5050) (v3.0.0) robot fleet simulator. It fakes a configurable fleet of AGVs — by default 5 real robot archetypes (Boston Dynamics Spot, Unitree Go2, PAL Robotics TIAGo, Unitree H1, SunFounder PiDog) — that speak the real order/instant-action/state/zone protocol, so you can point any VDA5050 fleet manager at it and watch it drive a graph, reject conflicting orders, cancel, pause, hibernate/shut down, manage maps and zone sets, pick/drop loads, wait for external triggers, wait for corridor/zone access grants, and recover from injected faults (including a spec-correct `RETRIABLE`/`retry`/`skipRetry` flow), without needing real hardware.
 
-Unlike a quick reference simulator, this implements the actual order/instant-action validation rules from the spec — idle-gate on new orders, `orderUpdateId` accept/reject/ignore semantics, `cancelOrder`, pause, `blockingType` handling — verified by a conformance test suite, not a shallow approximation.
+Unlike a quick reference simulator, this implements the actual protocol rules from the spec rather than a shallow approximation, verified by a conformance test suite:
+- Order lifecycle: idle-gate on new orders, `orderUpdateId` accept/reject/ignore semantics, `cancelOrder`, pause, `blockingType` handling (on node, edge, *and* generic instant actions).
+- The **full Section 6.2.3 "Predefined Actions" catalog** (`src/vda5050_sim/action_catalog.py`, transcribed directly from the spec's Table 4) — all ~28 standardized actionTypes, each with the exact instant/node/edge/zone scope the spec defines for it, enforced at runtime (a `pick` sent as an instant action, or a `stateRequest` sent on a node, is rejected the same way an unsupported action is). Covers connection-state lifecycle (`startHibernation`/`stopHibernation`/`shutdown`), map and zone-set management (`downloadMap`/`enableMap`/`deleteMap`, `downloadZoneSet`/`enableZoneSet`/`deleteZoneSet`), load handling (`pick`/`drop`, reflected in `state.loads`), sensing (`detectObject`/`finePositioning`), external correlation (`waitForTrigger`/`trigger`), housekeeping (`clearInstantActions`/`clearZoneActions`/`stateRequest`/`logReport`), and a real `RETRIABLE` action-state machine (`retry`/`skipRetry`), not just the handful of actions most reference simulators implement.
+- Movement fidelity: per-edge `maximumSpeed`/orientation/`reachOrientationBeforeEntering`, proactive horizon (`newBaseRequest`) extension, `distanceSinceLastNode` tracking.
+- Traffic control: `Edge.corridor.releaseRequired` and `RELEASE`/`COORDINATED_REPLANNING` zones gate movement on a `responses` grant from fleet control, exactly as the spec defines. Five of VDA5050's ten zone types have real simulated runtime effects: `BLOCKED` (holds movement, requests a new base), `SPEED_LIMIT` (caps travel speed inside the zone), `ACTION` (fires entry/during/exit actions), `DIRECTED`/`BIDIRECTED` (holds movement against a restricted travel direction).
+- Real MQTT semantics: one MQTT connection per robot (matching how real AGVs connect), each with its own retained messages and Last-Will-Testament, so a killed robot process is auto-reported `CONNECTION_BROKEN` by the broker itself — not just on clean shutdown.
 
 ![Log-viewer UI showing the default 5-robot fleet and live event log](docs/screenshot.png)
 
@@ -20,10 +25,10 @@ docker run -p 8000:8000 \
   vda5050-sim
 ```
 
-Robots publish/subscribe on the standard topic layout `vda5050/v3/{manufacturer}/{serialNumber}/{topic}` (`order`, `instantActions`, `state`, `visualization`, `connection`, `factsheet`) against whatever MQTT broker you point it at (Mosquitto, EMQX, HiveMQ, your fleet manager's own embedded broker, etc.). The log-viewer UI is at `http://localhost:8000/`.
+Each robot opens its **own** MQTT connection (own Last-Will-Testament), publishing/subscribing on the standard topic layout `vda5050/v3/{manufacturer}/{serialNumber}/{topic}` (`order`, `instantActions`, `zoneSet`, `responses`, `state`, `visualization`, `connection`, `factsheet`) against whatever broker you point it at (Mosquitto, EMQX, HiveMQ, your fleet manager's own embedded broker, etc.). `state`/`connection`/`factsheet` are published with `retain=True` (`visualization` deliberately isn't — high-rate/ephemeral). The log-viewer UI is at `http://localhost:8000/`.
 
 **2. Over NATS.**
-Set `TRANSPORT=nats` (and `NATS_BROKER=nats://...`) if your own stack already runs on a NATS message bus instead of MQTT — the same order/state/instant-action logic runs either way, just on `vda5050.v3.{manufacturer}.{serialNumber}.{topic}` subjects instead of MQTT topics.
+Set `TRANSPORT=nats` (and `NATS_BROKER=nats://...`) if your own stack already runs on a NATS message bus instead of MQTT — the same simulation logic runs either way, just on `vda5050.v3.{manufacturer}.{serialNumber}.{topic}` subjects over one shared connection instead of per-robot MQTT connections (core NATS has no retain/LWT concept to motivate the per-robot split there).
 
 ## Connecting a real fleet manager
 
@@ -36,20 +41,22 @@ Any VDA5050-conformant fleet manager can drive this simulator directly. A few re
 ## Architecture and Runtime
 
 - FastAPI service (Python 3.11, `uv`), one `SimulatedAgv` state machine + async pub/sub task set per configured robot (`src/vda5050_sim/agv.py`, `fleet.py`).
-- A `Transport` abstraction (`src/vda5050_sim/transport.py`) is the only thing that differs between the two modes: `NatsTransport` (dot-separated subjects, core NATS pub/sub, no retained/replay — so `connection`/`state`/`visualization` are heartbeated continuously) and `MqttTransport` (slash-separated topics over real MQTT via `aiomqtt`). The `SimulatedAgv`/`Fleet` logic is identical either way.
+- A `Transport` abstraction (`src/vda5050_sim/transport.py`) is the only thing that differs between the two modes. `NatsTransport`: one shared connection, dot-separated subjects, no retain/LWT. `MqttTransport`: **one `aiomqtt.Client` per robot**, slash-separated topics, real `retain`/Last-Will-Testament support. `Fleet` obtains a `Transport` per robot via `build_transport_factory()` — for NATS that returns the same connected shared instance every time; for MQTT it connects a fresh per-robot client (with its own Will) each time. `RobotRuntime`/`SimulatedAgv` logic is identical either way.
 - Wire schemas (`src/vda5050_sim/schemas.py`) are implemented directly against the official [VDA5050 3.0.0 JSON Schemas](https://github.com/VDA5050/VDA5050) — including field names that differ from common v1/v2-era naming (e.g. `nodeDescriptor` not `nodeDescription`, `maximumSpeed` not `maxSpeed`), and the fact that v3.0.0 edges have no `startNodeId`/`endNodeId` at all (traversal order comes purely from a shared node/edge `sequenceId` space).
+- Action progress (node-bound, edge-bound, and generic instant actions alike) is advanced through one shared state machine keyed off an `_action_registry` that survives a node/edge being dropped from the remaining-graph list — otherwise a non-blocking action started on a since-departed node/edge would freeze at `RUNNING` forever.
+- Traffic control (`Edge.corridor.releaseRequired` -> `EdgeRequest`, `RELEASE`/`COORDINATED_REPLANNING` zone membership via point-in-polygon -> `ZoneRequest`) gates movement exactly like the existing `released` node/edge gate, resolved by a `responses` message from fleet control.
 
 ## API Surface
 
-- **MQTT** (subscribe, per robot): `vda5050/v3/{manufacturer}/{serial}/order`, `.../instantActions`. (publish): `.../state`, `.../visualization`, `.../connection`, `.../factsheet`.
-- **NATS** (subscribe, per robot): `vda5050.v3.{manufacturer}.{serial}.order`, `...instantActions`. (publish): `...state`, `...visualization`, `...connection`, `...factsheet`.
+- **MQTT** (subscribe, per robot): `.../order`, `.../instantActions`, `.../zoneSet`, `.../responses`. (publish, retained except visualization): `.../state`, `.../visualization`, `.../connection`, `.../factsheet`.
+- **NATS**: same message types, dot-separated subjects (`vda5050.v3.{manufacturer}.{serial}.{type}`), no retain.
 - **REST**: `GET /health` (liveness), `GET /fleet` (JSON snapshot of every robot's live state), `GET /logs?n=200` (recent structured event log), `GET /` (log-viewer UI).
 
 ## Configuration
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `TRANSPORT` | `nats` | `mqtt` (standalone) or `nats` |
+| `TRANSPORT` | `nats` | `mqtt` (standalone, one connection per robot) or `nats` |
 | `MQTT_HOST` | `localhost` | MQTT broker host (transport=mqtt) |
 | `MQTT_PORT` | `1883` | MQTT broker port |
 | `MQTT_USERNAME` / `MQTT_PASSWORD` | unset | MQTT auth, if the broker requires it |
@@ -62,8 +69,15 @@ Any VDA5050-conformant fleet manager can drive this simulator directly. A few re
 | `VISUALIZATION_HZ` | `2.0` | `visualization` publish rate |
 | `CONNECTION_HEARTBEAT_S` | `2.0` | `connection` heartbeat interval |
 | `TICK_S` | `0.2` | Movement/order-processing tick |
-| `ACTION_DURATION_S` | `1.0` | Simulated duration of a node/edge action |
+| `ACTION_DURATION_S` | `1.0` | Simulated duration of a node/edge/instant action |
+| `DEFAULT_SPEED_MPS` | `0.5` | Fallback linear speed if a robot has no `max_speed` |
+| `DEFAULT_ANGULAR_SPEED_RAD_S` | `1.0` | Fallback angular speed if a robot has no `angular_speed` |
+| `HORIZON_THRESHOLD_NODES` | `2` | Proactively set `newBaseRequest` once this many released nodes remain |
+| `DEFAULT_BATTERY_DRAIN_PERCENT_PER_METER` | `0.05` | Battery drain while driving, if a robot has no override |
+| `DEFAULT_BATTERY_CHARGE_PERCENT_PER_S` | `5.0` | Battery charge rate while `charging`, if a robot has no override |
 | `PORT` | `8000` | HTTP port |
+
+Per-robot overrides (`max_speed`, `angular_speed`, `battery_drain_percent_per_meter`, `battery_charge_percent_per_s`, `fault_profile.{connection_drop,error_injection,field_violation,service_mode,emergency_stop}_probability`) live in `fleet.default.yaml` — see that file for the full per-robot schema.
 
 ## Local Development
 
@@ -78,13 +92,26 @@ TRANSPORT=mqtt uv run uvicorn vda5050_sim.main:app --reload --port 8000
 nats-server &
 uv run uvicorn vda5050_sim.main:app --reload --port 8000
 
-uv run pytest      # conformance suite (spins up its own nats-server)
+uv run pytest      # conformance suite (spins up its own nats-server/mosquitto)
 uv run ruff check
 ```
+
+## Known simplifications
+
+- **No trajectory (NURBS) path following.** Movement is straight-line node-to-node plus per-edge speed/orientation overrides — covers arrival timing, blocking, and orientation (what fleet-manager conformance testing actually exercises), not the exact path shape. A large, separable addition if you need it. `state.plannedPath`/`intermediatePath` stay unset for the same reason.
+- **3 of VDA5050's 10 zone types are accepted/stored only, with no simulated runtime effect: `PRIORITY`, `PENALTY`, `LINE_GUIDED`.** They only mean something with a real path planner or cost function to influence, which this simulator deliberately doesn't have. The other 7 (`RELEASE`/`COORDINATED_REPLANNING`/`BLOCKED`/`SPEED_LIMIT`/`ACTION`/`DIRECTED`/`BIDIRECTED`) all have real effects — see above.
+- **`downloadMap`/`downloadZoneSet` don't actually fetch anything.** Both carry a `*DownloadLink` parameter per the spec, but this simulator only simulates the timed download *lifecycle* (`WAITING`→`RUNNING`→`FINISHED`, added to `state.maps`/tracked zone sets) — no HTTP fetch happens. Same treatment for `updateCertificate` (simulated lifecycle, no real TLS cert install).
+- **MQTT Last-Will-Testament payload uses a fixed sentinel `headerId` and a connect-time (not actual-disconnect-time) timestamp** — a will payload is captured once at connect and can't be dynamically updated. Only `connectionState: CONNECTION_BROKEN` matters for a fleet manager's crash-detection purposes.
+- **`trigger`'s correlation to a specific `waitForTrigger` action is a judgment call.** Table 4 lists an `actionId` parameter for `retry`/`skipRetry` but not for `trigger` — the spec doesn't fully define how `trigger` picks a target when several `waitForTrigger` actions are outstanding at once. This simulator honors `actionId` if the sender supplies one anyway (a practical superset), otherwise releases the oldest still-`RUNNING` `waitForTrigger`.
+- **No physical charger-dock modeling.** `startCharging`/`stopCharging` just toggle a charge-rate timer wherever/whenever commanded.
+- **`blockingTypes`/`pauseAllowed`/`cancelAllowed` in the factsheet are this simulator's own reasonable declarations, not spec-mandated values** — VDA5050 leaves those as each manufacturer's own capability self-declaration for every actionType. See `action_catalog.py`'s module docstring for the reasoning (grounded in Table 5's per-action state semantics where possible).
+
+Two genuine upstream spec bugs were found and fixed when vendoring the official JSON Schemas — see `src/vda5050_sim/json_schemas/README.md`. Two more (a self-contradictory `connectionState` enum, a `typeSpecification` required-field typo) are documented rather than silently patched — see `tests/test_schema_validation.py`. A third, in the raw prose of Table 4 itself (the `startHibernation`/`stopHibernation` rows are missing their trailing `zone` scope column), is documented in `action_catalog.py`.
 
 ## Troubleshooting
 
 - **A fleet manager can't see the robots over MQTT**: confirm `TRANSPORT=mqtt` and that both sides point at the same broker/`MQTT_TOPIC_PREFIX`; `mosquitto_sub -t 'vda5050/v3/#' -v` is the fastest way to check traffic is flowing at all.
+- **A killed/crashed robot isn't reported as `CONNECTION_BROKEN`**: confirm you're on `TRANSPORT=mqtt` (NATS mode has no LWT equivalent) and that the broker actually saw an ungraceful disconnect (a clean shutdown publishes `OFFLINE` instead, by design).
 
 ## Related
 

@@ -18,7 +18,16 @@ are asserted against directly here instead of via strict schema validation:
 
 from __future__ import annotations
 
-from helpers import TEST_PREFIX, collect_states, collect_visualizations, connection_listener
+from helpers import (
+    TEST_PREFIX,
+    collect_states,
+    collect_visualizations,
+    connection_listener,
+    make_action_param,
+    make_instant_actions,
+    publish_instant_actions,
+    state_listener,
+)
 
 from vda5050_sim.agv import RobotConfig
 from vda5050_sim.schemas import ConnectionState
@@ -55,3 +64,23 @@ async def test_connection_messages_conform_to_json_schema(fm, fleet_factory):
     assert factsheet.typeSpecification.seriesName == "Spot"
     assert factsheet.physicalParameters.maximumSpeed > 0
     assert any(a.actionType == "pick" for a in factsheet.protocolFeatures.mobileRobotActions)
+    errors = validate_message(factsheet.model_dump(mode="json", exclude_none=True), "factsheet")
+    # typeSpecification.required lists "mobileRobotKinematic" (see module
+    # docstring) — filter that one known, documented upstream bug out.
+    assert [e for e in errors if "mobileRobotKinematic" not in e] == []
+
+
+async def test_state_message_with_populated_maps_conforms_to_json_schema(fm, fleet_factory):
+    serial = "schema-maps-01"
+    await fleet_factory([RobotConfig(id=serial, model=MODEL, supported_actions=[])])
+
+    async with state_listener(fm, TEST_PREFIX, MODEL, serial) as listener:
+        download = make_action_param(
+            "dm1", "downloadMap", {"mapId": "m1", "mapVersion": "v1", "mapDownloadLink": "https://example.test/m.map"}
+        )
+        msg = make_instant_actions(model=MODEL, serial=serial, actions=[download])
+        await publish_instant_actions(fm, TEST_PREFIX, MODEL, serial, msg)
+        matched = await listener.wait_for(lambda s: any(m.mapId == "m1" for m in s.maps))
+
+    errors = validate_message(matched.model_dump(mode="json", exclude_none=True), "state")
+    assert errors == [], errors

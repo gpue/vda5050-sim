@@ -19,6 +19,11 @@ VALIDATION_ERROR = "validationError"
 # Connector-side faults.
 HARDWARE_FAULT = "hardwareFault"
 
+# Map/zone-set lifecycle (spec Section 6.3, 6.4).
+UNKNOWN_MAP_ID = "unknownMapId"
+DUPLICATE_MAP = "duplicateMap"
+DUPLICATE_ZONE_SET = "duplicateZoneSet"
+
 
 def make_error(
     error_type: str,

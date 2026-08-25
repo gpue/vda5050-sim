@@ -91,6 +91,50 @@ class ActionScope(StrEnum):
     ZONE = "ZONE"
 
 
+class ZoneType(StrEnum):
+    BLOCKED = "BLOCKED"
+    LINE_GUIDED = "LINE_GUIDED"
+    RELEASE = "RELEASE"
+    COORDINATED_REPLANNING = "COORDINATED_REPLANNING"
+    SPEED_LIMIT = "SPEED_LIMIT"
+    ACTION = "ACTION"
+    PRIORITY = "PRIORITY"
+    PENALTY = "PENALTY"
+    DIRECTED = "DIRECTED"
+    BIDIRECTED = "BIDIRECTED"
+
+
+class ZoneRequestType(StrEnum):
+    ACCESS = "ACCESS"
+    REPLANNING = "REPLANNING"
+
+
+class EdgeRequestType(StrEnum):
+    CORRIDOR = "CORRIDOR"
+
+
+class RequestStatus(StrEnum):
+    """zoneRequest/edgeRequest.requestStatus — the robot's own view of one of
+    its outstanding requests. NOT the same enum as `GrantType` (below), which
+    is what fleet control replies with on the `responses` topic; see
+    `agv.py`'s `_apply_response` for the (spec-unstated, judgment-call)
+    mapping between the two."""
+
+    REQUESTED = "REQUESTED"
+    GRANTED = "GRANTED"
+    REVOKED = "REVOKED"
+    EXPIRED = "EXPIRED"
+
+
+class GrantType(StrEnum):
+    """responses[].grantType — fleet control's reply to a robot's request."""
+
+    GRANTED = "GRANTED"
+    QUEUED = "QUEUED"
+    REVOKED = "REVOKED"
+    REJECTED = "REJECTED"
+
+
 # ── Shared sub-models ────────────────────────────────────────────────────────
 
 
@@ -130,6 +174,19 @@ class Node(BaseModel):
     actions: list[Action] = Field(default_factory=list)
 
 
+class Corridor(BaseModel):
+    """Boundaries in which the robot may deviate from its trajectory (e.g. to
+    avoid obstacles). `releaseRequired` is the exact, spec-defined trigger for
+    an `edgeRequest`/`responses` grant handshake before traversing this edge
+    — see agv.py's corridor-release gating."""
+
+    leftWidth: float
+    rightWidth: float
+    corridorReferencePoint: str | None = None
+    releaseRequired: bool | None = None
+    releaseLossBehavior: str | None = None  # "STOP" (default) or "RETURN"
+
+
 class Edge(BaseModel):
     edgeId: str
     sequenceId: int
@@ -145,7 +202,7 @@ class Edge(BaseModel):
     maxRotationSpeed: float | None = None
     trajectory: Any | None = None
     length: float | None = None
-    corridor: Any | None = None
+    corridor: Corridor | None = None
     actions: list[Action] = Field(default_factory=list)
 
 
@@ -230,6 +287,47 @@ class ActionState(BaseModel):
     actionResult: str | None = None
 
 
+class ZoneRequest(BaseModel):
+    """Sent by the mobile robot (embedded in `state`) to fleet control when it
+    needs access to a RELEASE or COORDINATED_REPLANNING zone."""
+
+    requestId: str
+    requestType: ZoneRequestType
+    zoneId: str
+    zoneSetId: str
+    requestStatus: RequestStatus
+    trajectory: Any | None = None
+
+
+class EdgeRequest(BaseModel):
+    """Sent by the mobile robot (embedded in `state`) to fleet control when
+    about to traverse an edge whose `corridor.releaseRequired` is true."""
+
+    requestId: str
+    requestType: EdgeRequestType = EdgeRequestType.CORRIDOR
+    edgeId: str
+    sequenceId: int
+    requestStatus: RequestStatus
+
+
+class ZoneSetState(BaseModel):
+    """Summary entry in `state.zoneSets` — NOT the full zone geometry (that
+    lives only in the `zoneSet` message itself, tracked internally)."""
+
+    zoneSetId: str
+    mapId: str
+    zoneSetStatus: str = "ENABLED"  # ENABLED or DISABLED
+
+
+class MapState(BaseModel):
+    """Summary entry in `state.maps` — set via downloadMap/enableMap/deleteMap
+    (Section 6.3, spec Table 4)."""
+
+    mapId: str
+    mapVersion: str
+    mapStatus: str = "DISABLED"  # ENABLED or DISABLED
+
+
 # ── Top-level messages ───────────────────────────────────────────────────────
 
 
@@ -291,14 +389,12 @@ class StateMessage(BaseModel):
     loads: list[Load] = Field(default_factory=list)
     safetyState: SafetyState = Field(default_factory=SafetyState)
     distanceSinceLastNode: float | None = None
-    # Present in the schema but unused by this simulator (no zone/map
-    # authoring support) — always empty/omitted via exclude_none.
-    maps: list[Any] = Field(default_factory=list)
-    zoneSets: list[Any] = Field(default_factory=list)
+    maps: list[MapState] = Field(default_factory=list)
+    zoneSets: list[ZoneSetState] = Field(default_factory=list)
     plannedPath: Any | None = None
     intermediatePath: Any | None = None
-    zoneRequests: list[Any] = Field(default_factory=list)
-    edgeRequests: list[Any] = Field(default_factory=list)
+    zoneRequests: list[ZoneRequest] = Field(default_factory=list)
+    edgeRequests: list[EdgeRequest] = Field(default_factory=list)
 
 
 class VisualizationMessage(BaseModel):
@@ -423,3 +519,75 @@ class FactsheetMessage(BaseModel):
     protocolFeatures: ProtocolFeatures
     mobileRobotGeometry: MobileRobotGeometry = Field(default_factory=MobileRobotGeometry)
     loadSpecification: LoadSpecification = Field(default_factory=LoadSpecification)
+
+
+# ── Zones / responses (traffic-control subsystem) ───────────────────────────
+#
+# `zoneSet` (fleet control -> robot) defines zone geometry/rules for one map;
+# `responses` (fleet control -> robot) is how fleet control answers the
+# robot's own outstanding zoneRequest/edgeRequest entries (reported inside
+# `state`, above). This simulator implements the two concrete, spec-explicit
+# access-control triggers: Edge.corridor.releaseRequired (-> EdgeRequest) and
+# RELEASE/COORDINATED_REPLANNING zone membership (-> ZoneRequest). It does
+# NOT simulate the runtime *effects* of the other eight zone types
+# (BLOCKED/SPEED_LIMIT/PRIORITY/PENALTY/DIRECTED/BIDIRECTED/ACTION/
+# LINE_GUIDED) — those are accepted/stored/round-trip cleanly but have no
+# behavioral effect; implementing each one's actual runtime semantics would
+# be its own separate, large effort.
+
+
+class Zone(BaseModel):
+    zoneId: str
+    zoneType: ZoneType
+    vertices: list[Vertex2d] = Field(default_factory=list)
+    zoneDescriptor: str | None = None
+    # SPEED_LIMIT
+    maximumSpeed: float | None = None
+    # ACTION
+    entryActions: list[Action] = Field(default_factory=list)
+    duringActions: list[Action] = Field(default_factory=list)
+    exitActions: list[Action] = Field(default_factory=list)
+    # PRIORITY / PENALTY — the official 3.0.0 schema's conditional blocks for
+    # these two require "priorityFactor"/"penaltyFactor" but only define the
+    # property under a key with a stray trailing space ("priorityFactor ",
+    # "penaltyFactor "), so no payload can ever satisfy that schema section
+    # as literally published. Treated as an unambiguous typo (same class of
+    # issue as the trailing-comma bugs fixed when vendoring other schemas,
+    # not a meaningful spec choice) and implemented with the sane, un-spaced
+    # names — see json_schemas/README.md.
+    priorityFactor: float | None = None
+    penaltyFactor: float | None = None
+    # DIRECTED / BIDIRECTED
+    direction: float | None = None
+    limitation: str | None = None  # DIRECTED: SOFT|RESTRICTED|STRICT; BIDIRECTED: SOFT|RESTRICTED
+
+
+class ZoneSet(BaseModel):
+    mapId: str
+    zoneSetId: str
+    zoneSetDescriptor: str | None = None
+    zones: list[Zone] = Field(default_factory=list)
+
+
+class ZoneSetMessage(BaseModel):
+    headerId: int
+    timestamp: str
+    version: str = "3.0.0"
+    manufacturer: str
+    serialNumber: str
+    zoneSet: ZoneSet
+
+
+class Response(BaseModel):
+    requestId: str
+    grantType: GrantType
+    leaseExpiry: str | None = None
+
+
+class ResponsesMessage(BaseModel):
+    headerId: int
+    timestamp: str
+    version: str = "3.0.0"
+    manufacturer: str
+    serialNumber: str
+    responses: list[Response] = Field(default_factory=list)

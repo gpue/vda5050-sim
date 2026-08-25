@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from vda5050_sim.action_catalog import ACTION_CATALOG, ActionDef
 from vda5050_sim.schemas import (
+    ActionParameterDefinition,
     ActionScope,
     Envelope2d,
     FactsheetMessage,
@@ -155,6 +157,55 @@ def action_def(
     )
 
 
+# action_catalog.py's ActionParamDef.value_data_type uses the spec's own
+# Table 4 parameter-column notation ("float64", "string", "string[]") for
+# doc value — the *factsheet wire format* requires a different, fixed enum
+# (factsheet.schema.json: BOOL/NUMBER/INTEGER/STRING/OBJECT/ARRAY), so it's
+# translated here rather than duplicating Table 4's notation.
+_VALUE_DATA_TYPE_MAP = {
+    "string": "STRING",
+    "float64": "NUMBER",
+    "string[]": "ARRAY",
+}
+
+
+def factsheet_action_def(entry: ActionDef) -> MobileRobotActionDef:
+    """Build a MobileRobotActionDef straight from a verified action_catalog
+    entry — actionType/scopes/params come from the spec's Table 4; blocking/
+    pause/cancel capability flags are this simulator's own declared choices
+    (see action_catalog.py's module docstring)."""
+    return MobileRobotActionDef(
+        actionType=entry.action_type,
+        actionDescription=entry.description,
+        actionScopes=list(entry.scopes),
+        blockingTypes=list(entry.blocking_types),
+        pauseAllowed="true" if entry.pause_allowed else "false",
+        cancelAllowed="true" if entry.cancel_allowed else "false",
+        actionParameters=[
+            ActionParameterDefinition(
+                key=p.key,
+                valueDataType=_VALUE_DATA_TYPE_MAP.get(p.value_data_type, "STRING"),
+                description=p.description or None,
+                isOptional=p.optional,
+            )
+            for p in entry.params
+        ],
+    )
+
+
+def build_supported_actions(supported_actions: list[str]) -> list[MobileRobotActionDef]:
+    """Every `core=True` catalog action (always available) plus this robot's
+    configured optional capabilities — catalog-backed ones get accurate
+    scope/param metadata, manufacturer-custom ones (not in the VDA5050
+    standard vocabulary, e.g. a robot-specific gesture action) fall back to a
+    generic instant-only declaration."""
+    core = [factsheet_action_def(e) for e in ACTION_CATALOG.values() if e.core]
+    custom = [
+        factsheet_action_def(ACTION_CATALOG[a]) if a in ACTION_CATALOG else action_def(a, a) for a in supported_actions
+    ]
+    return core + custom
+
+
 def build_factsheet(
     robot_model: str,
     robot_id: str,
@@ -169,11 +220,7 @@ def build_factsheet(
     width = spec.get("width", 0.5)
 
     if supported_actions is None:
-        supported_actions = [
-            action_def("stop", "Emergency stop", blocking=["HARD"], pause_allowed="false", cancel_allowed="false"),
-            action_def("enable", "Enable robot"),
-            action_def("disable", "Disable robot", blocking=["HARD"]),
-        ]
+        supported_actions = build_supported_actions([])
 
     return FactsheetMessage(
         headerId=header_id,

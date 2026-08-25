@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from vda5050_sim.config import get_settings
 from vda5050_sim.fleet import Fleet, load_fleet_config
 from vda5050_sim.logbuffer import LogBuffer
-from vda5050_sim.transport import build_transport
+from vda5050_sim.transport import build_transport_factory
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("vda5050_sim")
@@ -25,13 +25,11 @@ _APP_ICON = _UI_DIR / "app_icon.svg"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    transport = build_transport(settings)
-    await transport.connect()
+    transport_factory = await build_transport_factory(settings)
     configs = load_fleet_config(settings.fleet_config_path)
-    fleet = Fleet(settings, transport, log_buffer)
+    fleet = Fleet(settings, transport_factory, log_buffer)
     await fleet.start(configs)
     app.state.fleet = fleet
-    app.state.transport = transport
     if settings.transport == "mqtt":
         logger.info(
             "vda5050-sim started with %d robots over MQTT %s:%d (prefix=%s)",
@@ -50,8 +48,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        await fleet.stop()
-        await transport.close()
+        await fleet.stop()  # closes every unique Transport it holds
 
 
 app = FastAPI(title="vda5050-sim", lifespan=lifespan)

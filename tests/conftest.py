@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
 import subprocess
+import tempfile
 import time
 
 import pytest
@@ -54,13 +56,54 @@ def nats_url():
         proc.kill()
 
 
+@pytest.fixture(scope="session")
+def mqtt_broker():
+    """Reuse an already-running MQTT broker on 1883, otherwise spawn a local
+    `mosquitto` (installed via apt in CI, brew locally) for the session —
+    mirrors the `nats_url` fixture's reuse-or-spawn pattern."""
+    port = 1883
+    if _port_open("127.0.0.1", port):
+        yield ("127.0.0.1", port)
+        return
+
+    conf_dir = tempfile.mkdtemp(prefix="vda5050-sim-mosquitto-")
+    conf_path = os.path.join(conf_dir, "mosquitto.conf")
+    with open(conf_path, "w") as f:
+        f.write(f"listener {port}\nallow_anonymous true\n")
+
+    proc = subprocess.Popen(
+        ["mosquitto", "-c", conf_path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    for _ in range(50):
+        if _port_open("127.0.0.1", port):
+            break
+        time.sleep(0.1)
+    else:
+        proc.terminate()
+        raise RuntimeError("mosquitto did not start in time")
+
+    yield ("127.0.0.1", port)
+
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
 def test_settings(**overrides) -> Settings:
     base = dict(
         nats_broker="nats://127.0.0.1:4222",
         vda5050_prefix=TEST_PREFIX,
         tick_s=0.02,
         action_duration_s=0.1,
-        state_hz=20.0,
+        # state_hz must be faster than 1/tick_s, or a transient one-tick
+        # state (e.g. an instant action's brief RUNNING status before it
+        # resolves on the very next tick) can fall between two state
+        # publishes and never get sampled by a test listener.
+        state_hz=200.0,
         visualization_hz=20.0,
         connection_heartbeat_s=1000.0,
         default_speed_mps=5.0,
@@ -87,7 +130,11 @@ async def fleet_factory(nats_url):
         settings = settings or test_settings()
         transport = NatsTransport(nats_url, settings.vda5050_prefix)
         await transport.connect()
-        fleet = Fleet(settings, transport, LogBuffer())
+
+        async def _transport_factory(cfg: RobotConfig) -> NatsTransport:
+            return transport
+
+        fleet = Fleet(settings, _transport_factory, LogBuffer())
         await fleet.start(configs)
         created.append(fleet)
         return fleet
@@ -95,8 +142,7 @@ async def fleet_factory(nats_url):
     yield _make
 
     for fleet in created:
-        await fleet.stop()
-        await fleet.transport.close()
+        await fleet.stop()  # closes every unique Transport it holds
 
 
 @pytest_asyncio.fixture

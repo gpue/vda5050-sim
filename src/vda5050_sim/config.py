@@ -43,10 +43,22 @@ class Settings(BaseSettings):
 
     # Movement/order-processing tick.
     tick_s: float = 0.2
-    # Fixed duration for a simulated node/edge action (WAITING->RUNNING->FINISHED).
+    # Fixed duration for a simulated node/edge/instant action (WAITING->RUNNING->FINISHED).
     action_duration_s: float = 1.0
     # Simulated linear travel speed when no per-robot override is set (m/s).
     default_speed_mps: float = 0.5
+    # Simulated angular travel speed when no per-robot override is set (rad/s).
+    default_angular_speed_rad_s: float = 1.0
+    # Proactively set newBaseRequest once remaining released nodes drop to/below
+    # this count, rather than only once an unreleased node/edge is actually hit.
+    horizon_threshold_nodes: int = 2
+
+    # -- Telemetry realism (Phase 4) — cosmetic/resilience-testing, not
+    # protocol correctness. Defaults keep drain "always on" for demo realism
+    # but fault probabilities off (0.0) unless a robot's fleet.yaml entry
+    # opts in via its own fault_profile.
+    default_battery_drain_percent_per_meter: float = 0.05
+    default_battery_charge_percent_per_s: float = 5.0
 
     base_path: str = ""
     port: int = 8000
