@@ -4,7 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 
 from vda5050_sim.config import get_settings
@@ -53,27 +53,36 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="vda5050-sim", lifespan=lifespan)
 
+# Nova apps run behind an ingress path prefix (e.g. /cell/vda5050-sim) that
+# is NOT stripped before reaching the pod — BASE_PATH (empty in standalone
+# Docker mode) mounts every route under that same prefix so they match what
+# the platform's ingress actually forwards.
+router = APIRouter()
 
-@app.get("/health")
+
+@router.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
 
 
-@app.get("/fleet")
+@router.get("/fleet")
 async def fleet_snapshot() -> JSONResponse:
     return JSONResponse(app.state.fleet.snapshot())
 
 
-@app.get("/logs")
+@router.get("/logs")
 async def logs(n: int = 200) -> JSONResponse:
     return JSONResponse(log_buffer.tail(n))
 
 
-@app.get("/")
+@router.get("/")
 async def index() -> FileResponse:
     return FileResponse(_UI_INDEX)
 
 
-@app.get("/app_icon.svg")
+@router.get("/app_icon.svg")
 async def app_icon() -> FileResponse:
     return FileResponse(_APP_ICON, media_type="image/svg+xml")
+
+
+app.include_router(router, prefix=settings.base_path)
