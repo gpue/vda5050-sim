@@ -2,6 +2,8 @@
 
 A standards-compliant [VDA5050](https://github.com/VDA5050/VDA5050) (v3.0.0) robot fleet simulator. It fakes a configurable fleet of AGVs — by default 5 real robot archetypes (Boston Dynamics Spot, Unitree Go2, PAL Robotics TIAGo, Unitree H1, SunFounder PiDog) — that speak the real order/instant-action/state/zone protocol, so you can point any VDA5050 fleet manager at it and watch it drive a graph, reject conflicting orders, cancel, pause, hibernate/shut down, manage maps and zone sets, pick/drop loads, wait for external triggers, wait for corridor/zone access grants, and recover from injected faults (including a spec-correct `RETRIABLE`/`retry`/`skipRetry` flow), without needing real hardware.
 
+It can also simulate a **mixed-protocol-version fleet** — some robots on the current v3.0.0, others announcing themselves as 2.1.0/2.0.0/1.1.0 with the wire shape and reduced capability set a real robot on that firmware would actually have (see [Simulating older VDA5050 protocol versions](#simulating-older-vda5050-protocol-versions)) — useful for testing that a fleet manager correctly discovers, parses, and displays a fleet it doesn't fully control the firmware of.
+
 Unlike a quick reference simulator, this implements the actual protocol rules from the spec rather than a shallow approximation, verified by a conformance test suite:
 - Order lifecycle: idle-gate on new orders, `orderUpdateId` accept/reject/ignore semantics, `cancelOrder`, pause, `blockingType` handling (on node, edge, *and* generic instant actions).
 - The **full Section 6.2.3 "Predefined Actions" catalog** (`src/vda5050_sim/action_catalog.py`, transcribed directly from the spec's Table 4) — all ~28 standardized actionTypes, each with the exact instant/node/edge/zone scope the spec defines for it, enforced at runtime (a `pick` sent as an instant action, or a `stateRequest` sent on a node, is rejected the same way an unsupported action is). Covers connection-state lifecycle (`startHibernation`/`stopHibernation`/`shutdown`), map and zone-set management (`downloadMap`/`enableMap`/`deleteMap`, `downloadZoneSet`/`enableZoneSet`/`deleteZoneSet`), load handling (`pick`/`drop`, reflected in `state.loads`), sensing (`detectObject`/`finePositioning`), external correlation (`waitForTrigger`/`trigger`), housekeeping (`clearInstantActions`/`clearZoneActions`/`stateRequest`/`logReport`), and a real `RETRIABLE` action-state machine (`retry`/`skipRetry`), not just the handful of actions most reference simulators implement.
@@ -38,6 +40,35 @@ Any VDA5050-conformant fleet manager can drive this simulator directly. A few re
 - **[NVIDIA Isaac Mission Dispatch](https://github.com/nvidia-isaac/isaac_mission_dispatch)** — a maintained, VDA5050-compatible mission-dispatch service if you want something closer to production-grade fleet-manager behavior than a toy.
 - **[vda-5050-lib.js](https://github.com/coatyio/vda-5050-lib.js)** — if you'd rather script your own master control quickly (TypeScript/Node, ships a `MasterController` class and JSON-schema-validated messages).
 
+## Simulating older VDA5050 protocol versions
+
+Every robot in `fleet.default.yaml` can set `protocol_version` (default `"3.0.0"`). Two entries do by default — `go2-legacy` (`2.1.0`) and `pidog-legacy` (`1.1.0`) — so a mixed-version fleet is there out of the box, no config changes needed:
+
+```yaml
+robots:
+  - id: go2-legacy
+    model: go2
+    protocol_version: "2.1.0"
+```
+
+This isn't just a different `version` string on an otherwise-identical v3.0.0 payload — the internal `SimulatedAgv` engine (movement, battery, order/action state machine) is exactly the same for every robot regardless of version, but a legacy-configured robot differs from a v3.0.0 one in two real ways:
+
+1. **Wire shape.** State/connection payloads are downgraded at the transport boundary (`src/vda5050_sim/legacy_shapes.py`) to the field names 1.1.0/2.0.0/2.1.0 actually use — these three are structurally identical to each other, and only differ from 3.0.0 at a small, well-defined set of fields:
+
+   | v3.0.0 | pre-3.0 (1.1.0 / 2.0.0 / 2.1.0) |
+   |---|---|
+   | `mobileRobotPosition` | `agvPosition` (no `localizationScore`/`deviationRange`; has `positionInitialized`) |
+   | `powerSupply.stateOfCharge` / `.range` | `batteryState.batteryCharge` / `.reach` (no `batteryCurrent`) |
+   | `safetyState.activeEmergencyStop` | `safetyState.eStop` |
+   | `connectionState: CONNECTION_BROKEN` | `connectionState: CONNECTIONBROKEN` |
+   | (`HIBERNATING`) | mapped to `OFFLINE` — no legacy hibernation flow is simulated |
+
+   A legacy robot also publishes on its own version-scoped subject/topic: NATS `vda5050.v1`/`vda5050.v2` (instead of the default `vda5050.v3`), MQTT `vda5050/v1`/`vda5050/v2`.
+
+2. **Capability gate.** 3.0.0-only functionality — confirmed against the VDA5050 project's own 3.0.0 release notes — is genuinely absent, not just relabeled: zones (the `zoneSet` topic isn't subscribed at all, and `downloadZoneSet`/`enableZoneSet`/`deleteZoneSet` are rejected), `updateCertificate` and `trigger` instant actions are rejected, and a fault-injected retriable-action failure goes straight to `FAILED` instead of the 3.0.0-only `RETRIABLE` state. Rejections use the spec-defined `invalidInstantAction` error (`src/vda5050_sim/agv.py`'s `LEGACY_UNSUPPORTED_ACTIONS`).
+
+**Known scope limit**: only *outgoing* messages (state/connection/factsheet/visualization) are version-shaped. Incoming orders/instant actions are still parsed as v3.0.0 regardless of a robot's `protocol_version` — legacy robots exist to be *discovered and read* correctly by a fleet manager across versions, not to receive genuinely legacy-shaped (e.g. `startNodeId`/`endNodeId`-addressed) orders.
+
 ## Architecture and Runtime
 
 - FastAPI service (Python 3.11, `uv`), one `SimulatedAgv` state machine + async pub/sub task set per configured robot (`src/vda5050_sim/agv.py`, `fleet.py`).
@@ -49,7 +80,7 @@ Any VDA5050-conformant fleet manager can drive this simulator directly. A few re
 ## API Surface
 
 - **MQTT** (subscribe, per robot): `.../order`, `.../instantActions`, `.../zoneSet`, `.../responses`. (publish, retained except visualization): `.../state`, `.../visualization`, `.../connection`, `.../factsheet`.
-- **NATS**: same message types, dot-separated subjects (`vda5050.v3.{manufacturer}.{serial}.{type}`), no retain.
+- **NATS**: same message types, dot-separated subjects (`vda5050.v3.{manufacturer}.{serial}.{type}` by default — `v1`/`v2` for robots configured with an older `protocol_version`, see [Simulating older VDA5050 protocol versions](#simulating-older-vda5050-protocol-versions)), no retain.
 - **REST**: `GET /health` (liveness), `GET /fleet` (JSON snapshot of every robot's live state), `GET /logs?n=200` (recent structured event log), `GET /` (log-viewer UI).
 
 ## Configuration
@@ -77,7 +108,7 @@ Any VDA5050-conformant fleet manager can drive this simulator directly. A few re
 | `DEFAULT_BATTERY_CHARGE_PERCENT_PER_S` | `5.0` | Battery charge rate while `charging`, if a robot has no override |
 | `PORT` | `8000` | HTTP port |
 
-Per-robot overrides (`max_speed`, `angular_speed`, `battery_drain_percent_per_meter`, `battery_charge_percent_per_s`, `fault_profile.{connection_drop,error_injection,field_violation,service_mode,emergency_stop}_probability`) live in `fleet.default.yaml` — see that file for the full per-robot schema.
+Per-robot overrides (`max_speed`, `angular_speed`, `battery_drain_percent_per_meter`, `battery_charge_percent_per_s`, `protocol_version`, `fault_profile.{connection_drop,error_injection,field_violation,service_mode,emergency_stop}_probability`) live in `fleet.default.yaml` — see that file for the full per-robot schema.
 
 ## Local Development
 
