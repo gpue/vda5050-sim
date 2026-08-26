@@ -18,6 +18,8 @@
 #   initial_battery: float                  # percent, default 100.0
 #   battery_drain_percent_per_meter: float  # default from DEFAULT_BATTERY_DRAIN_PERCENT_PER_METER
 #   battery_charge_percent_per_s: float     # default from DEFAULT_BATTERY_CHARGE_PERCENT_PER_S
+#   initial_x/initial_y/initial_theta: float  # home/dock pose, default 0.0 — every robot otherwise
+#                                              # starts stacked at the map origin
 #   fault_profile:
 #     connection_drop_probability: float    # per connection-heartbeat tick
 #     error_injection_probability: float    # per real tick — generic hardwareFault, or marks a RUNNING retriable action RETRIABLE
@@ -31,26 +33,36 @@ robots:
     model: spot
     manufacturer: BostonDynamics # quadruped carrier, 14kg payload
     supported_actions: [pick, drop]
+    initial_x: 0.0
+    initial_y: 0.0
 
   - id: go2-01
     model: go2
     manufacturer: Unitree # fast patrol quadruped, no cargo actions
     supported_actions: []
+    initial_x: 5.0
+    initial_y: 0.0
 
   - id: tiago-01
     model: tiago
     manufacturer: PALRobotics # mobile manipulator
     supported_actions: [pick, place, lift]
+    initial_x: 10.0
+    initial_y: 0.0
 
   - id: h1-01
     model: h1
     manufacturer: Unitree # humanoid, gesture-style instant actions
     supported_actions: [wave]
+    initial_x: 0.0
+    initial_y: 5.0
 
   - id: pidog-01
     model: pidog
     manufacturer: SunFounder # cheap/slow hobby robot, deliberately flaky
     supported_actions: [bark]
+    initial_x: 5.0
+    initial_y: 5.0
     fault_profile:
       connection_drop_probability: 0.03
       error_injection_probability: 0.05

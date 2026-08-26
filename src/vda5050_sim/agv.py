@@ -136,6 +136,12 @@ class RobotConfig:
     initial_battery: float = 100.0
     battery_drain_percent_per_meter: float | None = None
     battery_charge_percent_per_s: float | None = None
+    # Home/dock position — every robot otherwise starts at the map origin,
+    # which stacks an entire fleet on top of one another on any map view
+    # until each has been individually dispatched somewhere.
+    initial_x: float = 0.0
+    initial_y: float = 0.0
+    initial_theta: float = 0.0
     fault_profile: FaultProfile = field(default_factory=FaultProfile)
 
     def __post_init__(self) -> None:
@@ -237,9 +243,9 @@ class SimulatedAgv:
         self._elapsed_s = 0.0
 
         # Kinematics / telemetry
-        self.x = 0.0
-        self.y = 0.0
-        self.theta = 0.0
+        self.x = cfg.initial_x
+        self.y = cfg.initial_y
+        self.theta = cfg.initial_theta
         self.map_id = "default"
         self.battery_soc = cfg.initial_battery
         self.charging = False

@@ -180,3 +180,18 @@ async def test_edge_reach_orientation_before_entering_rotates_before_moving(runn
     await asyncio.sleep(1.5)  # rotation should be done, movement should have started
     states = await collect_states(fm, TEST_PREFIX, MODEL, SERIAL, 1)
     assert states[-1].mobileRobotPosition.x > 0.0
+
+
+async def test_initial_position_from_config(fm, fleet_factory):
+    from vda5050_sim.agv import RobotConfig
+
+    cfg = RobotConfig(id="home-bot-01", model=MODEL, supported_actions=[], initial_x=7.5, initial_y=-2.0, initial_theta=1.0)
+    fleet = await fleet_factory([cfg])
+    agv = fleet.runtimes[cfg.id].agv
+    assert agv.x == 7.5
+    assert agv.y == -2.0
+    assert agv.theta == 1.0
+
+    states = await collect_states(fm, TEST_PREFIX, MODEL, cfg.id, 1)
+    assert states[-1].mobileRobotPosition.x == 7.5
+    assert states[-1].mobileRobotPosition.y == -2.0

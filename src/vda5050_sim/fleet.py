@@ -50,6 +50,9 @@ def load_fleet_config(path: str) -> list[RobotConfig]:
                 initial_battery=float(entry.get("initial_battery", 100.0)),
                 battery_drain_percent_per_meter=entry.get("battery_drain_percent_per_meter"),
                 battery_charge_percent_per_s=entry.get("battery_charge_percent_per_s"),
+                initial_x=float(entry.get("initial_x", 0.0)),
+                initial_y=float(entry.get("initial_y", 0.0)),
+                initial_theta=float(entry.get("initial_theta", 0.0)),
                 fault_profile=FaultProfile(
                     connection_drop_probability=float(fault.get("connection_drop_probability", 0.0)),
                     error_injection_probability=float(fault.get("error_injection_probability", 0.0)),
