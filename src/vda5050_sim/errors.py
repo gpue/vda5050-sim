@@ -24,6 +24,12 @@ UNKNOWN_MAP_ID = "unknownMapId"
 DUPLICATE_MAP = "duplicateMap"
 DUPLICATE_ZONE_SET = "duplicateZoneSet"
 
+# Spec-defined: "Receival of an unsupported instant action" (errorLevel
+# WARNING) — used both for genuinely unknown action types and for actions
+# that exist in the spec but require a protocol version newer than what a
+# legacy-simulated robot announces (see agv.py's LEGACY_UNSUPPORTED_ACTIONS).
+INVALID_INSTANT_ACTION = "invalidInstantAction"
+
 
 def make_error(
     error_type: str,

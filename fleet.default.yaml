@@ -20,6 +20,12 @@
 #   battery_charge_percent_per_s: float     # default from DEFAULT_BATTERY_CHARGE_PERCENT_PER_S
 #   initial_x/initial_y/initial_theta: float  # home/dock pose, default 0.0 — every robot otherwise
 #                                              # starts stacked at the map origin
+#   protocol_version: str                   # VDA5050 header `version` this robot announces, default "3.0.0".
+#                                            # "1.x"/"2.x" values publish on their own NATS subject
+#                                            # (vda5050.v1/v2.*) and MQTT topic (vda5050/v1/v2/*) with the
+#                                            # pre-3.0 wire shape (agvPosition/batteryState/safetyState.eStop)
+#                                            # and reject 3.0.0-only instant actions (zones, updateCertificate,
+#                                            # trigger) — see legacy_shapes.py / agv.py's LEGACY_UNSUPPORTED_ACTIONS.
 #   fault_profile:
 #     connection_drop_probability: float    # per connection-heartbeat tick
 #     error_injection_probability: float    # per real tick — generic hardwareFault, or marks a RUNNING retriable action RETRIABLE
@@ -66,3 +72,23 @@ robots:
     fault_profile:
       connection_drop_probability: 0.03
       error_injection_probability: 0.05
+
+  # Older-firmware robots — same simulation engine underneath, but publish
+  # pre-3.0 wire shapes and reject 3.0.0-only capabilities (see
+  # protocol_version doc above). Exist to exercise nova-nav's handling of a
+  # mixed-version fleet on the same broker.
+  - id: go2-legacy
+    model: go2
+    manufacturer: Unitree
+    supported_actions: []
+    initial_x: 10.0
+    initial_y: 5.0
+    protocol_version: "2.1.0"
+
+  - id: pidog-legacy
+    model: pidog
+    manufacturer: SunFounder
+    supported_actions: [bark]
+    initial_x: 15.0
+    initial_y: 5.0
+    protocol_version: "1.1.0"

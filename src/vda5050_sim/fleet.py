@@ -53,6 +53,7 @@ def load_fleet_config(path: str) -> list[RobotConfig]:
                 initial_x=float(entry.get("initial_x", 0.0)),
                 initial_y=float(entry.get("initial_y", 0.0)),
                 initial_theta=float(entry.get("initial_theta", 0.0)),
+                protocol_version=str(entry.get("protocol_version", "3.0.0")),
                 fault_profile=FaultProfile(
                     connection_drop_probability=float(fault.get("connection_drop_probability", 0.0)),
                     error_injection_probability=float(fault.get("error_injection_probability", 0.0)),
@@ -79,21 +80,45 @@ class RobotRuntime:
         # tick races ahead of state's first publish.
         self._last_state_header_id: int = 0
         self.online = False
+        # NATS is a shared connection for the whole fleet (transport.prefix
+        # is fixed at construction) — a per-robot subject prefix override is
+        # how a robot announcing an older protocol_version ends up on
+        # vda5050.v1/v2 instead of the configured default. Derived by
+        # swapping the version segment on the *configured* prefix (not a
+        # hardcoded "vda5050.v3") so this also works against the test
+        # suite's "vda5050.v3test" prefix. None (no override) for 3.0.0
+        # robots, so existing v3-only deployments/tests are untouched.
+        # Ignored by MqttTransport, whose topic_prefix is already
+        # version-correct per-instance (see build_transport_factory).
+        self._protocol_major = agv.cfg.protocol_version.split(".", 1)[0]
+        self._version_prefix = (
+            None if self._protocol_major == "3" else settings.vda5050_prefix.replace("v3", f"v{self._protocol_major}", 1)
+        )
 
     async def start(self) -> None:
         self._subs.append(
-            await self.transport.subscribe_order(self.agv.manufacturer, self.agv.serial_number, self._on_order)
-        )
-        self._subs.append(
-            await self.transport.subscribe_instant_actions(
-                self.agv.manufacturer, self.agv.serial_number, self._on_instant_actions
+            await self.transport.subscribe_order(
+                self.agv.manufacturer, self.agv.serial_number, self._on_order, version_prefix=self._version_prefix
             )
         )
         self._subs.append(
-            await self.transport.subscribe_zone_set(self.agv.manufacturer, self.agv.serial_number, self._on_zone_set)
+            await self.transport.subscribe_instant_actions(
+                self.agv.manufacturer, self.agv.serial_number, self._on_instant_actions, version_prefix=self._version_prefix
+            )
         )
+        if self._protocol_major == "3":
+            # zoneSet is a 3.0.0+ capability (see agv.py's
+            # LEGACY_UNSUPPORTED_ACTIONS) — a legacy robot has nothing to
+            # subscribe to.
+            self._subs.append(
+                await self.transport.subscribe_zone_set(
+                    self.agv.manufacturer, self.agv.serial_number, self._on_zone_set, version_prefix=self._version_prefix
+                )
+            )
         self._subs.append(
-            await self.transport.subscribe_responses(self.agv.manufacturer, self.agv.serial_number, self._on_responses)
+            await self.transport.subscribe_responses(
+                self.agv.manufacturer, self.agv.serial_number, self._on_responses, version_prefix=self._version_prefix
+            )
         )
         self._tasks = [
             asyncio.create_task(self._movement_loop()),
@@ -131,7 +156,15 @@ class RobotRuntime:
 
     async def _publish(self, message_type: str, model) -> None:
         retain = message_type in RETAINED_MESSAGE_TYPES
-        await self.transport.publish(self.agv.manufacturer, self.agv.serial_number, message_type, model, retain=retain)
+        await self.transport.publish(
+            self.agv.manufacturer,
+            self.agv.serial_number,
+            message_type,
+            model,
+            retain=retain,
+            version=self.agv.cfg.protocol_version,
+            version_prefix=self._version_prefix,
+        )
 
     async def _movement_loop(self) -> None:
         tick_s = self.settings.tick_s

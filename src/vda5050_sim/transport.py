@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 from nats.aio.client import Client as NATS
 from pydantic import BaseModel
 
+from vda5050_sim import legacy_shapes
 from vda5050_sim.schemas import (
     ConnectionMessage,
     ConnectionState,
@@ -67,35 +68,72 @@ class Transport(abc.ABC):
 
     @abc.abstractmethod
     async def publish(
-        self, manufacturer: str, serial_number: str, message_type: str, model: BaseModel, *, retain: bool = False
+        self,
+        manufacturer: str,
+        serial_number: str,
+        message_type: str,
+        model: BaseModel,
+        *,
+        retain: bool = False,
+        version: str = "3.0.0",
+        version_prefix: str | None = None,
     ) -> None: ...
 
     @abc.abstractmethod
     async def subscribe_order(
-        self, manufacturer: str, serial_number: str, handler: Callable[[OrderMessage], Awaitable[None]]
+        self,
+        manufacturer: str,
+        serial_number: str,
+        handler: Callable[[OrderMessage], Awaitable[None]],
+        *,
+        version_prefix: str | None = None,
     ) -> Subscription: ...
 
     @abc.abstractmethod
     async def subscribe_instant_actions(
-        self, manufacturer: str, serial_number: str, handler: Callable[[InstantActionsMessage], Awaitable[None]]
+        self,
+        manufacturer: str,
+        serial_number: str,
+        handler: Callable[[InstantActionsMessage], Awaitable[None]],
+        *,
+        version_prefix: str | None = None,
     ) -> Subscription: ...
 
     @abc.abstractmethod
     async def subscribe_zone_set(
-        self, manufacturer: str, serial_number: str, handler: Callable[[ZoneSetMessage], Awaitable[None]]
+        self,
+        manufacturer: str,
+        serial_number: str,
+        handler: Callable[[ZoneSetMessage], Awaitable[None]],
+        *,
+        version_prefix: str | None = None,
     ) -> Subscription: ...
 
     @abc.abstractmethod
     async def subscribe_responses(
-        self, manufacturer: str, serial_number: str, handler: Callable[[ResponsesMessage], Awaitable[None]]
+        self,
+        manufacturer: str,
+        serial_number: str,
+        handler: Callable[[ResponsesMessage], Awaitable[None]],
+        *,
+        version_prefix: str | None = None,
     ) -> Subscription: ...
 
 
-def _dump(model: BaseModel) -> bytes:
+def _dump(model: BaseModel, *, message_type: str = "", version: str = "3.0.0") -> bytes:
     # exclude_none: unset Optional/V2-compat fields (agvPosition, batteryState,
     # localizationScore, ...) must be omitted, not sent as JSON null — the
     # VDA5050 JSON Schemas reject `null` for most of these.
-    return json.dumps(model.model_dump(mode="json", exclude_none=True)).encode("utf-8")
+    d = model.model_dump(mode="json", exclude_none=True)
+    if message_type == "state":
+        d = legacy_shapes.downgrade_state(d, version)
+    elif message_type == "connection":
+        d = legacy_shapes.downgrade_connection(d, version)
+    elif version != "3.0.0" and "version" in d:
+        # factsheet/order/visualization/responses have no confirmed field
+        # differences pre-3.0 — only stamp the announced version string.
+        d = {**d, "version": version}
+    return json.dumps(d).encode("utf-8")
 
 
 # ── NATS (shared connection) ─────────────────────────────────────────────────
@@ -115,8 +153,8 @@ class NatsTransport(Transport):
         self.prefix = prefix
         self._nc: NATS | None = None
 
-    def _subject(self, manufacturer: str, serial_number: str, message_type: str) -> str:
-        return f"{self.prefix}.{manufacturer}.{serial_number}.{message_type}"
+    def _subject(self, manufacturer: str, serial_number: str, message_type: str, *, prefix: str | None = None) -> str:
+        return f"{prefix or self.prefix}.{manufacturer}.{serial_number}.{message_type}"
 
     async def connect(self) -> None:
         self._nc = NATS()
@@ -126,41 +164,58 @@ class NatsTransport(Transport):
         if self._nc is not None:
             await self._nc.drain()
 
-    async def publish(self, manufacturer, serial_number, message_type, model, *, retain: bool = False) -> None:
+    async def publish(
+        self,
+        manufacturer,
+        serial_number,
+        message_type,
+        model,
+        *,
+        retain: bool = False,
+        version: str = "3.0.0",
+        version_prefix: str | None = None,
+    ) -> None:
         # retain is an MQTT-only concept; core NATS has no equivalent.
         assert self._nc is not None
-        await self._nc.publish(self._subject(manufacturer, serial_number, message_type), _dump(model))
+        subject = self._subject(manufacturer, serial_number, message_type, prefix=version_prefix)
+        await self._nc.publish(subject, _dump(model, message_type=message_type, version=version))
 
-    async def subscribe_order(self, manufacturer, serial_number, handler) -> Subscription:
+    async def subscribe_order(self, manufacturer, serial_number, handler, *, version_prefix: str | None = None) -> Subscription:
         assert self._nc is not None
-        subject = self._subject(manufacturer, serial_number, "order")
+        subject = self._subject(manufacturer, serial_number, "order", prefix=version_prefix)
 
         async def _cb(msg) -> None:
             await handler(OrderMessage.model_validate_json(msg.data))
 
         return _NatsSubscription(await self._nc.subscribe(subject, cb=_cb))
 
-    async def subscribe_instant_actions(self, manufacturer, serial_number, handler) -> Subscription:
+    async def subscribe_instant_actions(
+        self, manufacturer, serial_number, handler, *, version_prefix: str | None = None
+    ) -> Subscription:
         assert self._nc is not None
-        subject = self._subject(manufacturer, serial_number, "instantActions")
+        subject = self._subject(manufacturer, serial_number, "instantActions", prefix=version_prefix)
 
         async def _cb(msg) -> None:
             await handler(InstantActionsMessage.model_validate_json(msg.data))
 
         return _NatsSubscription(await self._nc.subscribe(subject, cb=_cb))
 
-    async def subscribe_zone_set(self, manufacturer, serial_number, handler) -> Subscription:
+    async def subscribe_zone_set(
+        self, manufacturer, serial_number, handler, *, version_prefix: str | None = None
+    ) -> Subscription:
         assert self._nc is not None
-        subject = self._subject(manufacturer, serial_number, "zoneSet")
+        subject = self._subject(manufacturer, serial_number, "zoneSet", prefix=version_prefix)
 
         async def _cb(msg) -> None:
             await handler(ZoneSetMessage.model_validate_json(msg.data))
 
         return _NatsSubscription(await self._nc.subscribe(subject, cb=_cb))
 
-    async def subscribe_responses(self, manufacturer, serial_number, handler) -> Subscription:
+    async def subscribe_responses(
+        self, manufacturer, serial_number, handler, *, version_prefix: str | None = None
+    ) -> Subscription:
         assert self._nc is not None
-        subject = self._subject(manufacturer, serial_number, "responses")
+        subject = self._subject(manufacturer, serial_number, "responses", prefix=version_prefix)
 
         async def _cb(msg) -> None:
             await handler(ResponsesMessage.model_validate_json(msg.data))
@@ -200,6 +255,7 @@ class MqttTransport(Transport):
         password: str | None = None,
         tls: bool = False,
         topic_prefix: str = "vda5050/v3",
+        protocol_version: str = "3.0.0",
     ) -> None:
         self._host = host
         self._port = port
@@ -209,6 +265,7 @@ class MqttTransport(Transport):
         self._password = password
         self._tls = tls
         self.topic_prefix = topic_prefix
+        self._protocol_version = protocol_version
         self._client_ctx = None
         self._client = None
         self._handlers: dict[str, tuple[Callable, type]] = {}
@@ -230,7 +287,7 @@ class MqttTransport(Transport):
             serialNumber=self._serial_number,
             connectionState=ConnectionState.CONNECTION_BROKEN,
         )
-        return _dump(msg)
+        return _dump(msg, message_type="connection", version=self._protocol_version)
 
     async def connect(self) -> None:
         import aiomqtt
@@ -255,32 +312,52 @@ class MqttTransport(Transport):
         if self._client_ctx is not None:
             await self._client_ctx.__aexit__(None, None, None)
 
-    async def publish(self, manufacturer, serial_number, message_type, model, *, retain: bool = False) -> None:
+    async def publish(
+        self,
+        manufacturer,
+        serial_number,
+        message_type,
+        model,
+        *,
+        retain: bool = False,
+        version: str = "3.0.0",
+        version_prefix: str | None = None,
+    ) -> None:
+        # version_prefix is a NATS-only concept (shared connection needing a
+        # per-call subject override) — this transport's topic_prefix is
+        # already fixed per-robot at construction time.
         assert self._client is not None
-        await self._client.publish(self._topic(message_type), payload=_dump(model), qos=1, retain=retain)
+        payload = _dump(model, message_type=message_type, version=version)
+        await self._client.publish(self._topic(message_type), payload=payload, qos=1, retain=retain)
 
-    async def subscribe_order(self, manufacturer, serial_number, handler) -> Subscription:
+    async def subscribe_order(self, manufacturer, serial_number, handler, *, version_prefix: str | None = None) -> Subscription:
         topic = self._topic("order")
         assert self._client is not None
         await self._client.subscribe(topic)
         self._handlers[topic] = (handler, OrderMessage)
         return _MqttSubscription(self, topic)
 
-    async def subscribe_instant_actions(self, manufacturer, serial_number, handler) -> Subscription:
+    async def subscribe_instant_actions(
+        self, manufacturer, serial_number, handler, *, version_prefix: str | None = None
+    ) -> Subscription:
         topic = self._topic("instantActions")
         assert self._client is not None
         await self._client.subscribe(topic)
         self._handlers[topic] = (handler, InstantActionsMessage)
         return _MqttSubscription(self, topic)
 
-    async def subscribe_zone_set(self, manufacturer, serial_number, handler) -> Subscription:
+    async def subscribe_zone_set(
+        self, manufacturer, serial_number, handler, *, version_prefix: str | None = None
+    ) -> Subscription:
         topic = self._topic("zoneSet")
         assert self._client is not None
         await self._client.subscribe(topic)
         self._handlers[topic] = (handler, ZoneSetMessage)
         return _MqttSubscription(self, topic)
 
-    async def subscribe_responses(self, manufacturer, serial_number, handler) -> Subscription:
+    async def subscribe_responses(
+        self, manufacturer, serial_number, handler, *, version_prefix: str | None = None
+    ) -> Subscription:
         topic = self._topic("responses")
         assert self._client is not None
         await self._client.subscribe(topic)
@@ -318,6 +395,12 @@ async def build_transport_factory(settings: Settings) -> TransportFactory:
     if settings.transport == "mqtt":
 
         async def _make_mqtt(cfg: RobotConfig) -> Transport:
+            major = cfg.protocol_version.split(".", 1)[0]
+            topic_prefix = (
+                settings.mqtt_topic_prefix
+                if major == "3"
+                else settings.mqtt_topic_prefix.replace("v3", f"v{major}", 1)
+            )
             transport = MqttTransport(
                 settings.mqtt_host,
                 settings.mqtt_port,
@@ -326,7 +409,8 @@ async def build_transport_factory(settings: Settings) -> TransportFactory:
                 username=settings.mqtt_username,
                 password=settings.mqtt_password,
                 tls=settings.mqtt_tls,
-                topic_prefix=settings.mqtt_topic_prefix,
+                topic_prefix=topic_prefix,
+                protocol_version=cfg.protocol_version,
             )
             await transport.connect()
             return transport

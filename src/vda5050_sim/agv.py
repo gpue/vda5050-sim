@@ -143,6 +143,12 @@ class RobotConfig:
     initial_y: float = 0.0
     initial_theta: float = 0.0
     fault_profile: FaultProfile = field(default_factory=FaultProfile)
+    # VDA5050 header `version` this robot announces itself as, and the wire
+    # shape it publishes state/connection in — "3.0.0" (default) matches
+    # this simulator's native internal model 1:1; "1.x"/"2.x" values are
+    # downgraded at the transport boundary (see legacy_shapes.py) so nova-nav
+    # and other consumers can be tested against a mixed-version fleet.
+    protocol_version: str = "3.0.0"
 
     def __post_init__(self) -> None:
         if not self.manufacturer:
@@ -151,6 +157,15 @@ class RobotConfig:
 
 _BLOCKING_TYPES_THAT_HOLD_MOVEMENT = (BlockingType.HARD, BlockingType.SOFT, BlockingType.SINGLE)
 _ACTIVE_ACTION_STATUSES = (ActionStatus.WAITING, ActionStatus.INITIALIZING, ActionStatus.RUNNING, ActionStatus.PAUSED)
+
+# Instant actions that only exist from VDA5050 3.0.0 onward (per the
+# project's own 3.0.0 release notes: zones, and the updateCertificate/
+# trigger actions are all listed as new in that release) — a robot
+# configured with an older `protocol_version` rejects these rather than
+# silently supporting a capability its announced version doesn't have.
+LEGACY_UNSUPPORTED_ACTIONS = frozenset(
+    {"downloadZoneSet", "enableZoneSet", "deleteZoneSet", "updateCertificate", "trigger"}
+)
 
 
 class SimulatedAgv:
@@ -454,6 +469,12 @@ class SimulatedAgv:
 
     def _handle_instant_action(self, action: Action) -> None:
         at = action.actionType
+        if at in LEGACY_UNSUPPORTED_ACTIONS and self.cfg.protocol_version.split(".", 1)[0] in ("1", "2"):
+            self._log(f"instant action '{at}' rejected — requires VDA5050 3.0.0+, robot is {self.cfg.protocol_version}")
+            self._reject_instant_action(
+                action, sim_errors.INVALID_INSTANT_ACTION, f"'{at}' requires VDA5050 3.0.0+"
+            )
+            return
         if self.hibernating and at != "stopHibernation":
             # Spec: while HIBERNATING, "shall only receive and respond to the
             # instant action 'stopHibernation' and shall not respond to any
@@ -1325,7 +1346,12 @@ class SimulatedAgv:
         if not (prob and random.random() < prob):
             return
         running_retriable = self._find_running_retriable_action()
-        if running_retriable is not None:
+        if running_retriable is not None and self.cfg.protocol_version.split(".", 1)[0] in ("1", "2"):
+            # RETRIABLE was only added in 3.0.0 — a legacy robot has no
+            # retry path, so a failure just fails outright.
+            running_retriable.actionStatus = ActionStatus.FAILED
+            self._log(f"action '{running_retriable.actionId}' failed (no RETRIABLE support pre-3.0)")
+        elif running_retriable is not None:
             # Real spec state machine (line 1258-1274): a retriable action
             # that fails while RUNNING goes to RETRIABLE, not FAILED — it
             # only leaves that state via an explicit `retry`/`skipRetry`
