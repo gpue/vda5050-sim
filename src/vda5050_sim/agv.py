@@ -1347,7 +1347,13 @@ class SimulatedAgv:
         errors = list(self.pending_errors)
         self.pending_errors.clear()
         node_states = [
-            NodeState(nodeId=n.nodeId, sequenceId=n.sequenceId, released=n.released, nodeDescriptor=n.nodeDescriptor)
+            NodeState(
+                nodeId=n.nodeId,
+                sequenceId=n.sequenceId,
+                released=n.released,
+                nodeDescriptor=n.nodeDescriptor,
+                nodePosition=n.nodePosition,
+            )
             for n in self.nodes
         ]
         edge_states = [

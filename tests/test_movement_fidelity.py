@@ -195,3 +195,23 @@ async def test_initial_position_from_config(fm, fleet_factory):
     states = await collect_states(fm, TEST_PREFIX, MODEL, cfg.id, 1)
     assert states[-1].mobileRobotPosition.x == 7.5
     assert states[-1].mobileRobotPosition.y == -2.0
+
+
+async def test_state_node_positions_are_populated(running_fleet, fm):
+    """The bug this guards: build_state_message() built each NodeState
+    without nodePosition, even though the schema carries it — a fleet
+    manager rendering a robot's remaining live route from nodeStates alone
+    (without also tracking the order it sent) would see nothing."""
+    nodes = [make_node("n0", 0, 0.0, 0.0), make_node("n1", 2, 5.0, 1.5)]
+    order = make_order(
+        order_id="node-pos-1", order_update_id=0, model=MODEL, serial=SERIAL, nodes=nodes, edges=[make_edge("e0", 1)]
+    )
+    await publish_order(fm, TEST_PREFIX, MODEL, SERIAL, order)
+
+    states = await collect_states(fm, TEST_PREFIX, MODEL, SERIAL, 1)
+    positions = {n.nodeId: n.nodePosition for n in states[-1].nodeStates}
+    assert positions["n0"] is not None
+    assert positions["n0"].x == 0.0
+    assert positions["n0"].y == 0.0
+    assert positions["n1"].x == 5.0
+    assert positions["n1"].y == 1.5
