@@ -202,14 +202,21 @@ async def test_state_node_positions_are_populated(running_fleet, fm):
     without nodePosition, even though the schema carries it — a fleet
     manager rendering a robot's remaining live route from nodeStates alone
     (without also tracking the order it sent) would see nothing."""
+    # Race guard: collect_states(..., 1) grabs the NEXT published state after
+    # subscribing, which can — under CI's slower/loaded scheduling — still be
+    # a pre-order-processed state rather than one reflecting the just-published
+    # order. Use a listener + predicate (same idiom as test_legacy_protocol.py)
+    # to wait for a state that actually has n0's nodeStates entry, instead of
+    # assuming the very next message already reflects it.
     nodes = [make_node("n0", 0, 0.0, 0.0), make_node("n1", 2, 5.0, 1.5)]
     order = make_order(
         order_id="node-pos-1", order_update_id=0, model=MODEL, serial=SERIAL, nodes=nodes, edges=[make_edge("e0", 1)]
     )
-    await publish_order(fm, TEST_PREFIX, MODEL, SERIAL, order)
+    async with state_listener(fm, TEST_PREFIX, MODEL, SERIAL) as listener:
+        await publish_order(fm, TEST_PREFIX, MODEL, SERIAL, order)
+        matched = await listener.wait_for(lambda s: any(n.nodeId == "n0" for n in s.nodeStates))
 
-    states = await collect_states(fm, TEST_PREFIX, MODEL, SERIAL, 1)
-    positions = {n.nodeId: n.nodePosition for n in states[-1].nodeStates}
+    positions = {n.nodeId: n.nodePosition for n in matched.nodeStates}
     assert positions["n0"] is not None
     assert positions["n0"].x == 0.0
     assert positions["n0"].y == 0.0
