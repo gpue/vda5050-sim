@@ -158,14 +158,34 @@ class RobotConfig:
 _BLOCKING_TYPES_THAT_HOLD_MOVEMENT = (BlockingType.HARD, BlockingType.SOFT, BlockingType.SINGLE)
 _ACTIVE_ACTION_STATUSES = (ActionStatus.WAITING, ActionStatus.INITIALIZING, ActionStatus.RUNNING, ActionStatus.PAUSED)
 
-# Instant actions that only exist from VDA5050 3.0.0 onward (per the
-# project's own 3.0.0 release notes: zones, and the updateCertificate/
-# trigger actions are all listed as new in that release) — a robot
-# configured with an older `protocol_version` rejects these rather than
-# silently supporting a capability its announced version doesn't have.
-LEGACY_UNSUPPORTED_ACTIONS = frozenset(
-    {"downloadZoneSet", "enableZoneSet", "deleteZoneSet", "updateCertificate", "trigger"}
-)
+def _version_tuple(version: str) -> tuple[int, int]:
+    parts = version.split(".")
+    major = int(parts[0]) if parts and parts[0].isdigit() else 3
+    minor = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    return (major, minor)
+
+
+# Instant actions whose *message type itself* doesn't exist below a given
+# VDA5050 version — a robot configured with an older `protocol_version`
+# rejects these rather than silently supporting a capability its announced
+# version doesn't have. Minimum versions confirmed directly against the
+# VDA5050 project's own vendored JSON Schemas per tag (not just release-note
+# prose): `zoneSet.schema` is absent from both the 2.0.0 and 2.1.0 tags
+# (zones are 3.0.0-only, matching the 3.0.0 release notes: "Zones are
+# introduced..."); `state.schema`'s `maps` property is absent from the
+# 2.0.0 tag but present at 2.1.0 (map distribution was added *in* 2.1.0,
+# per that release's own "Added map distribution" note — NOT available in
+# 1.1.0/2.0.0, despite sharing major version "2" with 2.1.0).
+LEGACY_UNSUPPORTED_ACTIONS: dict[str, tuple[int, int]] = {
+    "downloadZoneSet": (3, 0),
+    "enableZoneSet": (3, 0),
+    "deleteZoneSet": (3, 0),
+    "updateCertificate": (3, 0),
+    "trigger": (3, 0),
+    "downloadMap": (2, 1),
+    "enableMap": (2, 1),
+    "deleteMap": (2, 1),
+}
 
 
 class SimulatedAgv:
@@ -469,10 +489,12 @@ class SimulatedAgv:
 
     def _handle_instant_action(self, action: Action) -> None:
         at = action.actionType
-        if at in LEGACY_UNSUPPORTED_ACTIONS and self.cfg.protocol_version.split(".", 1)[0] in ("1", "2"):
-            self._log(f"instant action '{at}' rejected — requires VDA5050 3.0.0+, robot is {self.cfg.protocol_version}")
+        min_version = LEGACY_UNSUPPORTED_ACTIONS.get(at)
+        if min_version is not None and _version_tuple(self.cfg.protocol_version) < min_version:
+            min_str = f"{min_version[0]}.{min_version[1]}.0"
+            self._log(f"instant action '{at}' rejected — requires VDA5050 {min_str}+, robot is {self.cfg.protocol_version}")
             self._reject_instant_action(
-                action, sim_errors.INVALID_INSTANT_ACTION, f"'{at}' requires VDA5050 3.0.0+"
+                action, sim_errors.INVALID_INSTANT_ACTION, f"'{at}' requires VDA5050 {min_str}+"
             )
             return
         if self.hibernating and at != "stopHibernation":
@@ -1346,7 +1368,7 @@ class SimulatedAgv:
         if not (prob and random.random() < prob):
             return
         running_retriable = self._find_running_retriable_action()
-        if running_retriable is not None and self.cfg.protocol_version.split(".", 1)[0] in ("1", "2"):
+        if running_retriable is not None and _version_tuple(self.cfg.protocol_version) < (3, 0):
             # RETRIABLE was only added in 3.0.0 — a legacy robot has no
             # retry path, so a failure just fails outright.
             running_retriable.actionStatus = ActionStatus.FAILED

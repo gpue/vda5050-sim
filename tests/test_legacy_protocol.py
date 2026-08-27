@@ -102,3 +102,67 @@ async def test_legacy_robot_rejects_zone_instant_action(fleet_factory, fm):
             lambda s: any(a.actionId == "za1" and a.actionStatus == ActionStatus.FAILED for a in s.instantActionStates)
         )
         assert any(e.errorType == "invalidInstantAction" for e in matched.errors)
+
+
+async def test_pre_2_1_robot_rejects_map_instant_action(fleet_factory, fm):
+    """Map distribution (downloadMap/enableMap/deleteMap, state.maps) was
+    added in 2.1.0 (that release's own "Added map distribution" note) — not
+    present in 1.1.0 or 2.0.0, despite 2.0.0 sharing major version "2" with
+    2.1.0. Confirmed against the VDA5050 project's own vendored
+    state.schema: no `maps` property at the 2.0.0 tag, present at 2.1.0."""
+    serial = "test-legacy-map-01"
+    await fleet_factory([RobotConfig(id=serial, model=MODEL, protocol_version="1.1.0")])
+
+    async with state_listener(fm, _legacy_prefix("1.1.0"), MODEL, serial) as listener:
+        msg = make_instant_actions(
+            model=MODEL,
+            serial=serial,
+            actions=[make_action_param("dm1", "downloadMap", {"mapId": "warehouse-1", "mapVersion": "v1"})],
+        )
+        await publish_instant_actions(fm, _legacy_prefix("1.1.0"), MODEL, serial, msg)
+
+        matched = await listener.wait_for(
+            lambda s: any(a.actionId == "dm1" and a.actionStatus == ActionStatus.FAILED for a in s.instantActionStates)
+        )
+        assert any(e.errorType == "invalidInstantAction" for e in matched.errors)
+
+
+async def test_2_0_0_robot_rejects_map_instant_action(fleet_factory, fm):
+    """The exact boundary this fix targets: 2.0.0 and 2.1.0 share a major
+    version but only 2.1.0 supports map distribution — a major-digit-only
+    check (the bug this test guards) can't tell them apart."""
+    serial = "test-legacy-map-2-0-0"
+    await fleet_factory([RobotConfig(id=serial, model=MODEL, protocol_version="2.0.0")])
+
+    prefix = TEST_PREFIX.replace("v3", "v2", 1)
+    async with state_listener(fm, prefix, MODEL, serial) as listener:
+        msg = make_instant_actions(
+            model=MODEL,
+            serial=serial,
+            actions=[make_action_param("dm2", "downloadMap", {"mapId": "warehouse-1", "mapVersion": "v1"})],
+        )
+        await publish_instant_actions(fm, prefix, MODEL, serial, msg)
+
+        matched = await listener.wait_for(
+            lambda s: any(a.actionId == "dm2" and a.actionStatus == ActionStatus.FAILED for a in s.instantActionStates)
+        )
+        assert any(e.errorType == "invalidInstantAction" for e in matched.errors)
+
+
+async def test_2_1_0_robot_accepts_map_instant_action(fleet_factory, fm):
+    serial = "test-legacy-map-2-1-0"
+    await fleet_factory([RobotConfig(id=serial, model=MODEL, protocol_version="2.1.0")])
+
+    prefix = _legacy_prefix("2.1.0")
+    async with state_listener(fm, prefix, MODEL, serial) as listener:
+        msg = make_instant_actions(
+            model=MODEL,
+            serial=serial,
+            actions=[make_action_param("dm3", "downloadMap", {"mapId": "warehouse-1", "mapVersion": "v1"})],
+        )
+        await publish_instant_actions(fm, prefix, MODEL, serial, msg)
+
+        matched = await listener.wait_for(
+            lambda s: any(m.mapId == "warehouse-1" and m.mapStatus == "DISABLED" for m in s.maps)
+        )
+        assert matched.version == "2.1.0"
