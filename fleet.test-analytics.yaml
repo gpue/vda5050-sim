@@ -1,0 +1,116 @@
+# Same 7-robot roster as fleet.default.yaml (see that file for the full
+# per-robot schema reference), tuned to make nova-nav's Analytics tab
+# exercisable within a single manual test session instead of over real
+# hours/days:
+#   - battery_drain_percent_per_meter / battery_charge_percent_per_s raised
+#     ~20x so even a short dispatched route visibly moves the battery charts.
+#   - fault_profile broadened to every robot (not just pidog's default
+#     flakiness) at a moderate rate — enough error/connection events to
+#     populate the fleet error-rate chart and each robot's recent-events
+#     list without drowning a test session in constant noise.
+#   - initial_battery staggered so the fleet-status/distance-leaderboard
+#     charts already show variety on first load, before the sampler has
+#     accumulated any history of its own.
+#
+# Point a scratch/dev vda5050-sim deployment's FLEET_CONFIG_PATH at this —
+# never the shared demo instance (see nova-nav's FLEET_MANAGEMENT_GAP_ANALYSIS.md
+# and bluish-flow-actions-mobile-fix precedent for why not).
+
+robots:
+  - id: spot-01
+    model: spot
+    manufacturer: BostonDynamics
+    supported_actions: [pick, drop]
+    initial_x: 0.0
+    initial_y: 0.0
+    initial_battery: 90.0
+    battery_drain_percent_per_meter: 1.0
+    battery_charge_percent_per_s: 15.0
+    fault_profile:
+      connection_drop_probability: 0.01
+      error_injection_probability: 0.01
+
+  - id: go2-01
+    model: go2
+    manufacturer: Unitree
+    supported_actions: []
+    initial_x: 5.0
+    initial_y: 0.0
+    initial_battery: 70.0
+    battery_drain_percent_per_meter: 1.0
+    battery_charge_percent_per_s: 15.0
+    fault_profile:
+      connection_drop_probability: 0.01
+      error_injection_probability: 0.01
+
+  - id: tiago-01
+    model: tiago
+    manufacturer: PALRobotics
+    supported_actions: [pick, place, lift]
+    initial_x: 10.0
+    initial_y: 0.0
+    initial_battery: 55.0
+    battery_drain_percent_per_meter: 1.0
+    battery_charge_percent_per_s: 15.0
+    fault_profile:
+      connection_drop_probability: 0.01
+      error_injection_probability: 0.01
+      field_violation_probability: 0.005
+
+  - id: h1-01
+    model: h1
+    manufacturer: Unitree
+    supported_actions: [wave]
+    initial_x: 0.0
+    initial_y: 5.0
+    initial_battery: 40.0
+    battery_drain_percent_per_meter: 1.0
+    battery_charge_percent_per_s: 15.0
+    fault_profile:
+      connection_drop_probability: 0.01
+      error_injection_probability: 0.01
+      service_mode_probability: 0.005
+
+  - id: pidog-01
+    model: pidog
+    manufacturer: SunFounder
+    supported_actions: [bark]
+    initial_x: 5.0
+    initial_y: 5.0
+    initial_battery: 20.0
+    battery_drain_percent_per_meter: 1.0
+    battery_charge_percent_per_s: 15.0
+    fault_profile:
+      connection_drop_probability: 0.03
+      error_injection_probability: 0.05
+      emergency_stop_probability: 0.005
+
+  # Legacy-protocol robots — same tuned rates, still exercising nova-nav's
+  # mixed-version handling alongside the analytics data.
+  - id: go2-legacy
+    model: go2
+    manufacturer: Unitree
+    supported_actions: []
+    initial_x: 10.0
+    initial_y: 5.0
+    initial_battery: 65.0
+    battery_drain_percent_per_meter: 1.0
+    battery_charge_percent_per_s: 15.0
+    protocol_version: "2.1.0"
+    fault_profile:
+      connection_drop_probability: 0.01
+      error_injection_probability: 0.01
+
+  - id: pidog-legacy
+    model: pidog
+    manufacturer: SunFounder
+    supported_actions: [bark]
+    initial_x: 15.0
+    initial_y: 5.0
+    initial_battery: 15.0
+    battery_drain_percent_per_meter: 1.0
+    battery_charge_percent_per_s: 15.0
+    protocol_version: "1.1.0"
+    fault_profile:
+      connection_drop_probability: 0.03
+      error_injection_probability: 0.05

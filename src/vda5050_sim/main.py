@@ -8,6 +8,7 @@ from fastapi import APIRouter, FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 
 from vda5050_sim.config import get_settings
+from vda5050_sim.debug_routes import router as debug_router
 from vda5050_sim.fleet import Fleet, load_fleet_config
 from vda5050_sim.logbuffer import LogBuffer
 from vda5050_sim.transport import build_transport_factory
@@ -85,4 +86,5 @@ async def app_icon() -> FileResponse:
     return FileResponse(_APP_ICON, media_type="image/svg+xml")
 
 
+router.include_router(debug_router)
 app.include_router(router, prefix=settings.base_path)

@@ -188,6 +188,15 @@ class RobotRuntime:
         for s in self._subs:
             await s.unsubscribe()
 
+    async def force_connection_state(self, state: ConnectionState) -> None:
+        """Debug-only: publish a connection message immediately instead of
+        waiting for the next connection_heartbeat_s tick — see
+        debug_routes.py. `online` is updated the same way _connection_loop
+        derives it, so /fleet and downstream consumers agree with what was
+        just published."""
+        self.online = state == ConnectionState.ONLINE
+        await self._publish("connection", self.agv.build_connection_message(state))
+
     async def _connection_loop(self) -> None:
         await self._publish("connection", self.agv.build_connection_message(ConnectionState.CONNECTION_BROKEN))
         await asyncio.sleep(0.2)
@@ -278,6 +287,16 @@ class Fleet:
             await runtime.stop()
         for transport in self._transports.values():
             await transport.close()
+
+    def find_runtime(self, manufacturer: str, serial: str) -> RobotRuntime | None:
+        """Debug-only lookup by (manufacturer, serial) — see debug_routes.py.
+        `runtimes` is keyed by config id, which *is* the serial number
+        (SimulatedAgv.serial_number = cfg.id), so this also guards against a
+        manufacturer mismatch on an id collision across configs."""
+        runtime = self.runtimes.get(serial)
+        if runtime is not None and runtime.agv.manufacturer == manufacturer:
+            return runtime
+        return None
 
     def snapshot(self) -> list[dict]:
         out = []
