@@ -12,9 +12,8 @@ from __future__ import annotations
 
 import pytest
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
-
 from helpers import TEST_PREFIX, connection_listener, state_listener
+from httpx import ASGITransport, AsyncClient
 
 from vda5050_sim.debug_routes import router as debug_router
 from vda5050_sim.schemas import ConnectionState
