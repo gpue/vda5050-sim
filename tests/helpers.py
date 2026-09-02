@@ -266,6 +266,16 @@ class Listener:
             self.received.append(self.parse(msg.data))
 
         self._sub = await self.fm.subscribe(self.subject, cb=_cb)
+        # subscribe() only queues the SUB protocol frame locally — it does
+        # NOT wait for the server to register it. flush() round-trips a
+        # PING/PONG, guaranteeing the subscription is actually live before
+        # the caller triggers whatever's supposed to publish to it. Every
+        # existing use of this helper happened to have enough inherent
+        # async delay between "enter the listener" and "the event actually
+        # publishes" (an instant action round-tripping through a robot's own
+        # task loop, etc.) to never expose this race — a debug endpoint that
+        # publishes synchronously the moment it's called does not.
+        await self.fm.flush()
         return self
 
     async def __aexit__(self, *exc) -> None:
